@@ -1,0 +1,477 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Service Manager</title>
+
+  <link rel="stylesheet" href="css/bootstrap.min.css">
+  <link rel="stylesheet" href="css/adminlte.min.css">
+  <link rel="stylesheet" href="css/sticky-footer-navbar.css">
+  <link rel="stylesheet" href="css/toastr.min.css">
+  <link rel="stylesheet" href="font-awesome/css/font-awesome.min.css">
+</head>
+
+<body>
+  <div class="jumbotron text-center" style="margin-bottom:0">
+    <h1>Service Manager System</h1>
+    <p>Manage all xxx services in one place effectively!</p> 
+  </div>
+
+  <div role="main" class="container">    
+    <table class="table table-striped projects">
+      <thead>
+        <tr>
+          <th style="width: 1%">
+            #
+          </th>
+          <th style="width: 20%">
+            Service ID
+          </th>
+          <th style="width: 40%">
+            Service Description
+          </th>
+          <th style="width: 15%" class="text-center">
+            Service Status
+          </th>
+          <th style="width: 25%">
+          </th>
+        </tr>
+      </thead>
+      <tbody id="services-container">
+      </tbody>
+      <tfoot>        
+        <tr>
+          <td>
+          </td>
+          <td>
+          </td>
+          <td>
+          </td>
+          <td>
+          </td>
+          <td class="project-actions text-right">
+            <a class="btn btn-primary btn-sm" data-toggle="modal" data-target="#AddServiceDialog" data-backdrop="static" data-keyboard="false" href="#">
+              <i class="fa fa-plus">
+              </i>
+              Add
+            </a>
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+    <!-- The Add Modal -->
+    <div class="modal" id="AddServiceDialog">
+      <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+        
+          <!-- Modal Header -->
+          <div class="modal-header">
+            <h4 class="modal-title">Add Service</h4>
+            <button type="button" class="close" data-dismiss="modal">&times;</button>
+          </div>
+          
+          <!-- Modal body -->
+          <div class="modal-body">
+            <table class="table table-striped table-borderless projects">
+              <thead>
+                <tr>
+                  <th style="width: 1%">
+                    #
+                  </th>
+                  <th style="width: 25%">
+                    Service ID
+                  </th>
+                  <th style="width: 50%">
+                    Service Description
+                  </th>
+                  <th style="width: 20%">
+                  </th>
+                </tr>
+              </thead>
+              <tbody id="service-definition-container">
+              </tbody>
+            </table>
+          </div>
+          
+          <!-- Modal footer -->
+          <div class="modal-footer">
+            <button type="button" id="AddServiceOK" class="btn btn-success">OK</button>
+          </div>
+          
+        </div>
+      </div>
+    </div>
+    
+    <!-- The Edit Modal -->
+    <div class="modal" id="EditServiceDialog">
+      <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+        
+          <!-- Modal Header -->
+          <div class="modal-header">
+            <h4 class="modal-title">Edit Service</h4>
+            <button type="button" class="close" data-dismiss="modal">&times;</button>
+          </div>
+          
+          <!-- Modal body -->
+          <div class="modal-body">
+            <form>
+              <table class="table table-borderless table-sm projects">
+                <thead class="thead-light">
+                  <tr>
+                    <th style="width: 10%">
+                      <a id="LableServiceID">
+                        Service.ID
+                      </a>
+                      <br/>
+                      <small id="LableServiceVersion">
+                        Service.Version: x.x.x
+                      </small>
+                    </th>
+                    <th style="width: 50%">
+                      <input type="text" value="Service.Name" id="TextServiceName" class="form-control border-0"/>
+                      <small id="LableServiceDescription">
+                        Service.Description: ...
+                      </small>
+                    </th>
+                  </tr>
+                </thead>
+              </table>
+            
+              <div class="form-group row">
+                <label for="TextServiceOption" class="col-sm-2 col-form-label col-form-label-sm">Service Option</label>
+                <div class="col-sm-10">
+                  <input type="text" class="form-control" id="TextServiceOption" placeholder="--service.lib=services\service_library_file [--service.config=conf\config_file] --log.type=daily --log.level=[trace|debug|info|warn|error|fatal|off] --log.keep=7 --log.size=80">
+                </div>
+              </div>   
+              <div class="form-group">
+                <label for="TextServiceViwer" class="col-sm-3 col-form-label col-form-label-sm">Service Configuration Content</label>
+                <textarea class="form-control" id="TextServiceViwer" rows="10"></textarea>
+              </div>
+            </form>
+          </div>
+          
+          <!-- Modal footer -->
+          <div class="modal-footer">
+            <input type="hidden" id="ServiceType" value="service"/>
+            <input type="hidden" id="ServiceIndex" value=""/>
+            <button type="button" id="EditServiceOK" class="btn btn-success">OK</button>
+          </div>
+          
+        </div>
+      </div>
+    </div>
+  </div>
+  <footer class="footer">
+    <div class="container">
+      <span class="text-muted">Copyright 1999-2020 by ZhiGao Wu. All Rights Reserved.</span>
+    </div>
+  </footer>
+  <script src="js/jquery.min.js"></script>
+  <script src="js/popper.min.js"></script>
+  <script src="js/toastr.min.js"></script>
+  <script src="js/bootstrap.min.js"></script>
+  <script>
+    var status_background_class_types = ["badge-dark", "badge-danger", "badge-warning", "badge-warning", "badge-success"];
+    var status_link_class_types = ["disabled", "enabled", "disabled", "disabled", "enabled"];
+    var status_action_types = ["Start", "Start", "Stop", "Start", "Stop"];
+    
+    function EnableAddServiceOKButton() {
+      $('#AddServiceOK').prop('disabled', false);
+    }
+    function ShowEditServiceDialog() {
+      $('#ServiceType').val('service');
+      var modal = $('#EditServiceDialog');
+      modal.find('.modal-title').text('Edit Service');
+      modal.find('#EditServiceOK').text('Save');
+      modal.modal({backdrop: 'static', keyboard: false});
+    }
+    
+    function OperateService(el) {
+      var el_tr = $(el).parent().parent();
+      var service_name = el_tr.find( "td.service-name > input" ).val();
+      var action_name = el_tr.find( "td.service-actions > input" ).val();
+      $.ajax({
+        url: '/service/control',
+        method: 'POST',
+        dataType: 'json',
+        data: {
+          'name': service_name,
+          'action': action_name
+        },
+        success: function(json) {
+          if (json.code == 0) {
+            toastr.success(action_name + ' service success');
+            LoadServices();
+          } else {
+            toastr.error(json.result);
+          }              
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
+    function DeleteService(el) {
+      var el_tr = $(el).parent().parent();
+      var service_name = el_tr.find( "td.service-name > input" ).val();
+      $.ajax({
+        url: '/service/delete',
+        method: 'POST',
+        dataType: 'json',
+        data: {
+          'name': service_name
+        },
+        success: function(json) {
+          if (json.code == 0) {
+            toastr.success('Delete service success');
+            LoadServices();
+          } else {
+            toastr.error(json.result);
+          }              
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
+    function LoadServices()
+    {
+      $('#services-container').empty();
+      $.ajax({
+        url: '/service/list',
+        method: 'POST',
+        dataType: 'json',
+        data: {},
+        success: function(json) {          
+          $.each(json.result, function(index, obj) {
+            var status_background_class = status_background_class_types[obj.status_code];
+            var status_link_class = status_link_class_types[obj.status_code];
+            var status_action = status_action_types[obj.status_code];
+            $('#services-container').append(
+              `<tr>
+                <td>
+                  ${index + 1}
+                </td>
+                <td>
+                  <a>
+                    ${obj.id}
+                  </a>
+                  <br/>
+                  <small>
+                    Version: ${obj.library.version}
+                  </small>
+                </td>
+                <td class="service-name">
+                  <a>
+                    ${obj.name}
+                  </a>
+                  <input type="hidden" value="${obj.name}"/>
+                  <br/>
+                  <small>
+                    Description: ${obj.description}
+                  </small>
+                </td>
+                <td class="service-state" class="text-center">                  
+                  <span class="badge ${status_background_class}">${obj.status_txt}</span>
+                </td>
+                <td class="service-actions text-right">
+                  <!--a class="btn btn-info btn-sm" onclick="ShowEditServiceDialog()" href="#">
+                    <i class="fa fa-pencil">
+                    </i>
+                    Edit
+                  </a-->
+                  <input type="hidden" value="${status_action}"/>
+                  <a class="btn btn-primary btn-sm ${status_link_class}" onclick="OperateService(this)" href="#">
+                    <i class="fa fa-play">
+                    </i>
+                    ${status_action}
+                  </a>
+                  <a class="btn btn-danger btn-sm" onclick="DeleteService(this)" href="#">
+                    <i class="fa fa-trash">
+                    </i>
+                    Delete
+                  </a>
+                </td>
+              </tr>`
+            );
+          });
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
+    function InitAddServiceDialog()
+    {
+      $('#AddServiceOK').prop('disabled', true);
+      $('#AddServiceDialog').trigger('focus');
+        
+      $.ajax({
+        url: '/definition/list',
+        method: 'POST',
+        dataType: 'json',
+        data: {},
+        success: function(json) {
+          $.each(json.result, function(index, obj) {
+            $('#service-definition-container').append(
+              `<tr>
+                <td>
+                  ${index + 1}
+                </td>
+                <td>
+                  <a>
+                    ${obj.id}
+                  </a>
+                  <br/>
+                  <small>
+                    Version: ${obj.library.version}
+                  </small>
+                </td>
+                <td class="definition-id">
+                  <a>
+                    ${obj.name}
+                  </a>
+                  <br/>
+                  <small>
+                    Description: ${obj.description}
+                  </small>
+                </td>
+                <td class="project-actions text-right">
+                  <input type="radio" name="ServiceGroupName" value="${obj.id}" onclick="EnableAddServiceOKButton()" aria-label="Radio button for following text input"/>
+                </td>
+              </tr>`
+            );
+          });
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
+    function InitEditServiceDialog()
+    {
+      var stype = $('#ServiceType').val();
+      if ("definition" == stype) {
+        $('#TextServiceName').prop('disabled', false);
+      } else {
+        $('#TextServiceName').prop('disabled', true);
+      }
+      
+      $('#EditServiceDialog').trigger('focus');
+      
+      $.ajax({
+        url: '/service/detail/get',
+        method: 'POST',
+        dataType: 'json',
+        data: {'type': stype, 'index': $('#ServiceIndex').val()},
+        success: function(json) {
+          if (json.code == 0) {              
+            var serv = json.result;
+            $('#LableServiceID').text(serv.id);
+            $('#LableServiceVersion').text(serv.library.version);
+            $('#TextServiceName').val(serv.name);
+            $('#LableServiceDescription').text(serv.description);
+            $('#TextServiceOption').val(serv.option);
+            $('#TextServiceViwer').val(serv.configuration);
+          } else {
+            toastr.error(json.result);
+          }
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
+    function SubmitServiceChange()
+    {
+      var stype = $('#ServiceType').val();
+      if ("definition" == stype) {
+        $.ajax({
+          url: '/service/create',
+          method: 'POST',
+          dataType: 'json',
+          data: {
+            'type': stype, 
+            'index': $('#ServiceIndex').val(),
+            'name': $('#TextServiceName').val(),
+            'option': $('#TextServiceOption').val(),
+            'configuration': $('#TextServiceViwer').val()
+          },
+          success: function(json) {
+            if (json.code == 0) {
+              toastr.success('Create service success');
+              $('#EditServiceDialog').modal('hide');
+              LoadServices();
+            } else {
+              toastr.error(json.result);
+            }              
+          },
+          error: function (jqXHR, textStatus, errorThrown) {
+            toastr.error(textStatus + jqXHR.responseText);
+          }
+        });
+      } else {          
+        $.ajax({
+          url: '/service/detail/set',
+          method: 'POST',
+          dataType: 'json',
+          data: {
+            'type': stype, 
+            'index': $('#ServiceIndex').val(),
+            'name': $('#TextServiceName').val(),
+            'option': $('#TextServiceOption').val(),
+            'configuration': $('#TextServiceViwer').val()
+          },
+          success: function(json) {
+            if (json.code == 0) {
+              toastr.success('Save service configuration success');
+              $('#EditServiceDialog').modal('hide');
+            } else {
+              toastr.error(json.result);
+            }              
+          },
+          error: function (jqXHR, textStatus, errorThrown) {
+            toastr.error(textStatus + jqXHR.responseText);
+          }
+        });
+      }
+    }
+    
+    $(function() {
+      $('#AddServiceDialog').on('hidden.bs.modal', function (e) {
+        $('#service-definition-container').empty();
+      });
+      
+      $('#AddServiceDialog').on('shown.bs.modal', InitAddServiceDialog);
+      
+      $('#AddServiceOK').on('click', function() {
+        $('#ServiceIndex').val($('input[name="ServiceGroupName"]:checked').val());
+        
+        $('#AddServiceDialog').modal('hide');
+        
+        $('#ServiceType').val('definition');
+        
+        var modal = $('#EditServiceDialog');
+        modal.find('.modal-title').text('Install Service');
+        modal.find('#EditServiceOK').text('Install');
+        modal.modal({backdrop: 'static', keyboard: false});
+      });
+      
+      $('#EditServiceDialog').on('shown.bs.modal', InitEditServiceDialog);
+      
+      $('#EditServiceOK').on('click', SubmitServiceChange);
+      
+      LoadServices();
+    });
+  </script>
+</body>
+</html>

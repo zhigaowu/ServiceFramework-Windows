@@ -3,13 +3,16 @@
 
 #include "ServiceInterface.h"
 
+#include "StringUtil.h"
+
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
 
 #include <algorithm>
-#include <fstream>
 #include <sstream>
 #include <regex>
+
+static const char* Service_Prototype_File = "\\prototype.json";
 
 static char Service_Status_Name[][16] = {
     "Unknown",
@@ -32,7 +35,7 @@ typedef std::unordered_map<std::string, int> Service_Options_Type;
 
 static Service_Options_Type Service_Options = {
     { "--service.lib", Service_Option_Lib },
-    { "--service.config", Service_Option_Lib },
+    { "--service.config", Service_Option_Config },
     { "--log.name", Service_Option_Log_Name },
     { "--log.level", Service_Option_Log_Level },
     { "--log.type", Service_Option_Log_Type },
@@ -49,9 +52,10 @@ std::shared_ptr<spdlog::logger>& HttpService::logger()
 
 HttpService::HttpService()
     : _mgr(), _opts()
-    , _service_definitions()
+    , _definitions_path(), _service_definitions()
     , _services_path(), _service_instances()
     , _root()
+    , _package()
 {
     _opts.document_root = nullptr;
     _opts.enable_directory_listing = "no";
@@ -59,6 +63,28 @@ HttpService::HttpService()
 
 HttpService::~HttpService()
 {
+}
+
+static std::string GetLastErrorString()
+{
+    std::string err_str;
+    DWORD code = GetLastError();
+    LPVOID lpMsgBuf = NULL;
+    DWORD bufLen = FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER |
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        code,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR)&lpMsgBuf,
+        0, NULL);
+    if (lpMsgBuf)
+    {
+        err_str = (LPCSTR)lpMsgBuf;
+        LocalFree(lpMsgBuf);
+    }
+    return err_str;
 }
 
 static void GetLastErrorString(rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
@@ -204,6 +230,53 @@ static void GetLastErrorString(rapidjson::Value& err, rapidjson::Document::Alloc
 #endif
 }
 
+struct file_writer_data {
+    FILE *fp;
+    size_t bytes_written;
+};
+
+static void ev_upload(struct mg_connection *nc, int ev, void *p) 
+{
+    HttpService* http = (HttpService*) nc->user_data;
+    struct mg_http_multipart_part *mp = (struct mg_http_multipart_part *) p;
+
+    switch (ev) {
+    case MG_EV_HTTP_PART_BEGIN: 
+    {
+        if (!http->begin_upload_package()) 
+        {
+            mg_printf(nc, "%s",
+                "HTTP/1.1 500 Failed to open a file\r\n"
+                "Content-Length: 0\r\n\r\n");
+            nc->flags |= MG_F_SEND_AND_CLOSE;
+        }
+        break;
+    }
+    case MG_EV_HTTP_PART_DATA: 
+    {
+        if (!http->write_upload_package(mp->data.p, mp->data.len))
+        {
+            mg_printf(nc, "%s",
+                "HTTP/1.1 500 Failed to write to a file\r\n"
+                "Content-Length: 0\r\n\r\n");
+            nc->flags |= MG_F_SEND_AND_CLOSE;
+        }
+        break;
+    }
+    case MG_EV_HTTP_PART_END: 
+    {
+        mg_printf(nc,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Connection: close\r\n\r\n"
+            "Written %ld of POST data to a temp file\n\n",
+            http->end_upload_package());
+        nc->flags |= MG_F_SEND_AND_CLOSE;
+        break;
+    }
+    }
+}
+
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 {
     struct http_message *hm = (struct http_message *)ev_data;
@@ -241,10 +314,6 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
         {
             http->handle_service_control(nc, hm); /* Handle RESTful call */
         }
-        else if (mg_vcmp(&hm->uri, "/service/upgrade") == 0)
-        {
-            http->handle_service_upgrade(nc, hm); /* Handle RESTful call */
-        }
         else
         {
             http->handle_html(nc, hm);
@@ -260,284 +329,18 @@ int HttpService::Create(const std::string& address, int port, const std::string&
 {
     HttpService::_logger = log;
     _root = root;
-    do
+    _definitions_path = service_definition_config;
+
+    if (Service_Module_Failed == load_service_definitions())
     {
-        // check service definition file
-        std::ifstream ifs(service_definition_config);
-        ifs.seekg(0, std::ios::end);
-        size_t length = (size_t)ifs.tellg();
-        ifs.seekg(0, std::ios::beg);
+        return Service_Module_Failed;
+    }
 
-        std::vector<char> content(length);
-        ifs.read(content.data(), length);
-
-        rapidjson::Document json;
-        json.Parse(content.data());
-        if (!json.IsArray())
-        {
-            _logger->error("create http service failed: invalid service definition file({})", service_definition_config.c_str());
-            return Service_Module_Failed;
-        }
-
-        for (rapidjson::Value& serv_json : json.GetArray())
-        {
-            Service_t serv;
-            if (!serv_json.HasMember("id") || !serv_json["id"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): id field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.id = serv_json["id"].GetString();
-
-            if (!serv_json.HasMember("name") || !serv_json["name"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): name field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.name = serv_json["name"].GetString();
-
-            if (serv_json.HasMember("description"))
-            {
-                if (serv_json["description"].IsString())
-                {
-                    serv.description = serv_json["description"].GetString();
-                } 
-                else
-                {
-                    _logger->error("create http service failed: invalid service definition file({}): description field error", service_definition_config.c_str());
-                    return Service_Module_Failed;
-                }
-            }
-
-            if (!serv_json.HasMember("library") || !serv_json["library"].IsObject())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): library field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-
-            rapidjson::Value& lib_json = serv_json["library"];
-            if (!lib_json.HasMember("path") || !lib_json["path"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): library.path field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.path = lib_json["path"].GetString();
-
-            if (!lib_json.HasMember("configuration") || !lib_json["configuration"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): library.configuration field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.config = lib_json["configuration"].GetString();
-
-            if (!lib_json.HasMember("version") || !lib_json["version"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): library.version field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.ver = lib_json["version"].GetString();
-
-            rapidjson::Value& log_json = serv_json["log"];
-            if (log_json.HasMember("name"))
-            {
-                if (log_json["name"].IsString())
-                {
-                    serv.log.name = log_json["name"].GetString();
-                }
-                else
-                {
-                    _logger->error("create http service failed: invalid service definition file({}): log.name field error", service_definition_config.c_str());
-                    return Service_Module_Failed;
-                }
-            }
-
-            if (!log_json.HasMember("type") || !log_json["type"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): log.type field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.type = log_json["type"].GetString();
-
-            if (!log_json.HasMember("level") || !log_json["level"].IsString())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): log.level field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.level = log_json["level"].GetString();
-
-            if (!log_json.HasMember("keep") || !log_json["keep"].IsNumber())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): log.keep field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.keep = log_json["keep"].GetInt();
-
-            if (!log_json.HasMember("size") || !log_json["size"].IsNumber())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): log.size field error", service_definition_config.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.size = log_json["size"].GetInt();
-
-            _service_definitions.emplace_back(serv);
-        }
-    } while (false);
-
-    do
+    _services_path = service_active_config;
+    if (Service_Module_Failed == load_service_instances())
     {
-        // check services file
-        _services_path = service_active_config;
-        // check service definition file
-        std::ifstream ifs(_services_path);
-        if (!ifs.is_open())
-        {
-            break;
-        }
-        ifs.seekg(0, std::ios::end);
-        size_t length = (size_t)ifs.tellg();
-        ifs.seekg(0, std::ios::beg);
-
-        std::vector<char> content(length);
-        ifs.read(content.data(), length);
-
-        rapidjson::Document services_doc;
-        services_doc.Parse(content.data());
-        rapidjson::Type jt = services_doc.GetType();
-        if (rapidjson::kObjectType != jt)
-        {
-            _logger->error("create http service failed: invalid services file({})", _services_path.c_str());
-            return Service_Module_Failed;
-        }
-
-        if (services_doc.Empty())
-        {
-            break;
-        }
-
-        if (!services_doc.HasMember("services"))
-        {
-            _logger->error("create http service failed: invalid services file({})", _services_path.c_str());
-            return Service_Module_Failed;
-        }
-
-        rapidjson::Value json = services_doc["services"].GetArray();
-        jt = json.GetType();
-        if (rapidjson::kArrayType != jt)
-        {
-            _logger->error("create http service failed: invalid services file({})", _services_path.c_str());
-            return Service_Module_Failed;
-        }
-
-        for (rapidjson::Value& serv_json : json.GetArray())
-        {
-            if (serv_json.IsObject() && serv_json.Empty())
-            {
-                continue;
-            }
-            Service_t serv;
-            if (!serv_json.HasMember("id") || !serv_json["id"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): id field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.id = serv_json["id"].GetString();
-
-            if (!serv_json.HasMember("name") || !serv_json["name"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): name field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.name = serv_json["name"].GetString();
-
-            if (serv_json.HasMember("description"))
-            {
-                if (serv_json["description"].IsString())
-                {
-                    serv.description = serv_json["description"].GetString();
-                }
-                else
-                {
-                    _logger->error("create http service failed: invalid services file({}): description field error", _services_path.c_str());
-                    return Service_Module_Failed;
-                }
-            }
-
-            if (!serv_json.HasMember("library") || !serv_json["library"].IsObject())
-            {
-                _logger->error("create http service failed: invalid services file({}): library field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-
-            rapidjson::Value& lib_json = serv_json["library"];
-            if (!lib_json.HasMember("path") || !lib_json["path"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): library.path field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.path = lib_json["path"].GetString();
-
-            if (!lib_json.HasMember("configuration") || !lib_json["configuration"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): library.configuration field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.config = lib_json["configuration"].GetString();
-
-            if (!lib_json.HasMember("version") || !lib_json["version"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): library.version field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.library.ver = lib_json["version"].GetString();
-
-            rapidjson::Value& log_json = serv_json["log"];
-            if (log_json.HasMember("name"))
-            {
-                if (log_json["name"].IsString())
-                {
-                    serv.log.name = log_json["name"].GetString();
-                }
-                else
-                {
-                    _logger->error("create http service failed: invalid services file({}): log.name field error", service_definition_config.c_str());
-                    return Service_Module_Failed;
-                }
-            }
-
-            if (!log_json.HasMember("type") || !log_json["type"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): log.type field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.type = log_json["type"].GetString();
-
-            if (!log_json.HasMember("level") || !log_json["level"].IsString())
-            {
-                _logger->error("create http service failed: invalid services file({}): log.level field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.level = log_json["level"].GetString();
-
-            if (!log_json.HasMember("keep") || !log_json["keep"].IsNumber())
-            {
-                _logger->error("create http service failed: invalid services file({}): log.keep field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.keep = log_json["keep"].GetInt();
-
-            if (!log_json.HasMember("size") || !log_json["size"].IsNumber())
-            {
-                _logger->error("create http service failed: invalid service definition file({}): log.size field error", _services_path.c_str());
-                return Service_Module_Failed;
-            }
-            serv.log.size = log_json["size"].GetInt();
-
-            serv.status_code = 0;
-            serv.status_txt = Service_Status_Name[0];
-
-            _service_instances.emplace_back(serv);
-        }
-    } while (false);
+        return Service_Module_Failed;
+    }
 
     struct mg_bind_opts bind_opts;
     memset(&bind_opts, 0, sizeof(bind_opts));
@@ -550,8 +353,6 @@ int HttpService::Create(const std::string& address, int port, const std::string&
     char endpoint[256] = { 0 };
     snprintf(endpoint, sizeof(endpoint), "%s:%d", address.c_str(), port);
 
-    _opts.document_root = directory.c_str();
-
     // configure http service
     struct mg_connection *nc = mg_bind_opt(&_mgr, endpoint, ev_handler, bind_opts);
     if (nc == NULL)
@@ -560,6 +361,9 @@ int HttpService::Create(const std::string& address, int port, const std::string&
         return Service_Module_Failed;
     }
     nc->user_data = this;
+
+    _opts.document_root = directory.c_str();
+    mg_register_http_endpoint(nc, "/service/upload", ev_upload MG_UD_ARG(NULL));
 
     // Set up HTTP server parameters
     mg_set_protocol_http_websocket(nc);
@@ -579,6 +383,408 @@ void HttpService::Destroy()
     mg_mgr_free(&_mgr);
 
     _logger->info("destroy http service success");
+}
+
+int HttpService::load_service_definitions()
+{
+    WIN32_FIND_DATA ffd;
+
+    std::string pattern_all = _definitions_path + "*.*";
+    HANDLE hFind = FindFirstFile(pattern_all.c_str(), &ffd);
+    if (NULL == hFind)
+    {
+        _logger->error("create http service failed: find service definitions failed({})", GetLastErrorString().c_str());
+        return Service_Module_Failed;
+    }
+
+    do
+    {
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (ffd.cFileName[0] == '.' && (ffd.cFileName[1] == 0 || ffd.cFileName[1] == '.'))
+            {
+                continue;
+            }
+
+            Service_t serv;
+            serv.id = ffd.cFileName;
+            if ("ServiceManager.BS" == serv.id)
+            {
+                continue;
+            }
+
+            // check service definition file
+            std::ifstream ifs(_definitions_path + serv.id + Service_Prototype_File);
+            if (ifs.is_open())
+            {
+                ifs.seekg(0, std::ios::end);
+                size_t length = (size_t)ifs.tellg();
+                ifs.seekg(0, std::ios::beg);
+
+                std::vector<char> content(length);
+                ifs.read(content.data(), length);
+                ifs.close();
+
+                rapidjson::Document serv_json;
+                serv_json.Parse(content.data());
+                if (!serv_json.IsObject())
+                {
+                    _logger->warn("service prototype of definition({}) is invalid", ffd.cFileName);
+                    continue;
+                }
+                
+                if (!serv_json.HasMember("name"))
+                {
+                    _logger->warn("service prototype of definition({}) is invalid: name is not provided", ffd.cFileName);
+                    continue;
+                }
+                if (!serv_json["name"].IsString())
+                {
+                    _logger->warn("service prototype of definition({}) is invalid: name is not string", ffd.cFileName);
+                    continue;
+                }
+                serv.name = util::string::trim(serv_json["name"].GetString());
+
+                if (serv.name.empty())
+                {
+                    _logger->warn("service prototype of definition({}) is invalid: name is empty", ffd.cFileName);
+                    continue;
+                }
+
+                if (serv_json.HasMember("description"))
+                {
+                    if (serv_json["description"].IsString())
+                    {
+                        serv.description = util::string::trim(serv_json["description"].GetString());
+                    }
+                    else
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: description is not string", ffd.cFileName);
+                        continue;
+                    }
+                }
+
+                serv.library.name = std::string(ffd.cFileName) + std::string(".dll");
+                if (serv_json.HasMember("library"))
+                {
+                    if (!serv_json["library"].IsString())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: library is not string", ffd.cFileName);
+                        continue;
+                    }
+                    serv.library.name = util::string::trim(serv_json["library"].GetString());
+
+                    if (serv.library.name.empty())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: library is empty", ffd.cFileName);
+                        continue;
+                    }
+                }
+
+                if (serv_json.HasMember("configuration"))
+                {
+                    if (!serv_json["configuration"].IsString())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: configuration is not string", ffd.cFileName);
+                        continue;
+                    }
+                    serv.library.config = util::string::trim(serv_json["configuration"].GetString());
+                }
+
+                if (serv_json.HasMember("version"))
+                {
+                    if (!serv_json["version"].IsString())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: version is not string", ffd.cFileName);
+                        continue;
+                    }
+                    serv.library.ver = util::string::trim(serv_json["version"].GetString());
+
+                    if (serv.library.ver.empty())
+                    {
+                        serv.library.ver = "unknown";
+                    }
+                }
+
+                rapidjson::Value& log_json = serv_json["log"];
+                if (log_json.HasMember("name"))
+                {
+                    if (!log_json["name"].IsString())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: log.name is not string", ffd.cFileName);
+                        continue;
+                    }
+                    serv.log.name = util::string::trim(log_json["name"].GetString());
+                }
+
+                if (!log_json.HasMember("type"))
+                {
+                    _logger->warn("service prototype of definition({}) is invalid: log.type is not provided", ffd.cFileName);
+                    continue;
+                }
+                if (!log_json["type"].IsString())
+                {
+                    _logger->warn("service prototype of definition({}) is invalid: log.type is not string", ffd.cFileName);
+                    continue;
+                }
+                serv.log.type = util::string::trim(log_json["type"].GetString());
+
+                serv.log.level = "info";
+                if (log_json.HasMember("level"))
+                {
+                    if (!log_json["level"].IsString())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: log.level is not string", ffd.cFileName);
+                        continue;
+                    }
+                    serv.log.level = util::string::trim(log_json["level"].GetString());
+                }
+
+                serv.log.keep = 7;
+                if (log_json.HasMember("keep"))
+                {
+                    if (!log_json["keep"].IsNumber())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: log.keep is not number", ffd.cFileName);
+                        continue;
+                    }
+                    serv.log.keep = log_json["keep"].GetInt();
+                }
+                
+                serv.log.size = 7;
+                if (log_json.HasMember("size"))
+                {
+                    if (!log_json["size"].IsNumber())
+                    {
+                        _logger->warn("service prototype of definition({}) is invalid: log.size is not number", ffd.cFileName);
+                        continue;
+                    }
+                    serv.log.size = log_json["size"].GetInt();
+                }
+
+                _service_definitions.emplace_back(serv);
+            }
+            else
+            {
+                _logger->warn("service prototype of definition({}) does not exist", ffd.cFileName);
+            }
+        }
+    } while (FindNextFile(hFind, &ffd) != 0);
+
+    FindClose(hFind);
+
+    return Service_Module_Success;
+}
+
+int HttpService::load_service_instances()
+{
+    do 
+    {
+        std::ifstream ifs(_services_path);
+        if (!ifs.is_open())
+        {
+            break;
+        }
+        ifs.seekg(0, std::ios::end);
+        size_t length = (size_t)ifs.tellg();
+        ifs.seekg(0, std::ios::beg);
+
+        std::vector<char> content(length);
+        ifs.read(content.data(), length);
+        ifs.close();
+
+        rapidjson::Document instances_json;
+        instances_json.Parse(content.data());
+        rapidjson::Type jt = instances_json.GetType();
+        if (rapidjson::kNullType == jt)
+        {
+            break;
+        }
+
+        if (rapidjson::kObjectType != jt)
+        {
+            _logger->error("create http service failed: invalid services file({})", _services_path.c_str());
+            return Service_Module_Failed;
+        }
+
+        if (instances_json.Empty())
+        {
+            break;
+        }
+
+        if (!instances_json.HasMember("services"))
+        {
+            _logger->error("create http service failed: invalid services file({}), services field is not provided", _services_path.c_str());
+            return Service_Module_Failed;
+        }
+
+        rapidjson::Value json = instances_json["services"].GetArray();
+        jt = json.GetType();
+        if (rapidjson::kArrayType != jt)
+        {
+            _logger->error("create http service failed: invalid services file({}), services field is not array", _services_path.c_str());
+            return Service_Module_Failed;
+        }
+
+        for (rapidjson::Value& serv_json : json.GetArray())
+        {
+            if (serv_json.IsObject() && serv_json.Empty())
+            {
+                continue;
+            }
+
+            Service_t serv;
+            if (!serv_json.HasMember("id"))
+            {
+                _logger->warn("service is invalid: id is not provided");
+                continue;
+            }
+            if (!serv_json["id"].IsString())
+            {
+                _logger->warn("service is invalid: id is not string");
+                continue;
+            }
+            serv.id = util::string::trim(serv_json["id"].GetString());
+
+            if (!serv_json.HasMember("name"))
+            {
+                _logger->warn("service({}) is invalid: name is not provided", serv.id.c_str());
+                continue;
+            }
+            if (!serv_json["name"].IsString())
+            {
+                _logger->warn("service({}) is invalid: name is not string", serv.id.c_str());
+                continue;
+            }
+            serv.name = util::string::trim(serv_json["name"].GetString());
+
+            if (serv.name.empty())
+            {
+                _logger->warn("service({}) is invalid: name is empty", serv.id.c_str());
+                continue;
+            }
+
+            if (serv_json.HasMember("description"))
+            {
+                if (serv_json["description"].IsString())
+                {
+                    serv.description = util::string::trim(serv_json["description"].GetString());
+                }
+                else
+                {
+                    _logger->warn("service({}) is invalid: description is not string", serv.name.c_str());
+                    continue;
+                }
+            }
+
+            if (!serv_json.HasMember("library"))
+            {
+                _logger->warn("service({}) is invalid: library is not provided", serv.name.c_str());
+                continue;
+            }
+
+            if (!serv_json["library"].IsString())
+            {
+                _logger->warn("service({}) is invalid: library is not string", serv.name.c_str());
+                continue;
+            }
+            serv.library.name = util::string::trim(serv_json["library"].GetString());
+
+            if (serv.library.name.empty())
+            {
+                _logger->warn("service({}) is invalid: library is empty", serv.name.c_str());
+                continue;
+            }
+
+            if (serv_json.HasMember("configuration"))
+            {
+                if (!serv_json["configuration"].IsString())
+                {
+                    _logger->warn("service({}) is invalid: configuration is not string", serv.name.c_str());
+                    continue;
+                }
+                serv.library.config = util::string::trim(serv_json["configuration"].GetString());
+            }
+
+            if (serv_json.HasMember("version"))
+            {
+                if (!serv_json["version"].IsString())
+                {
+                    _logger->warn("service({}) is invalid: version is not string", serv.name.c_str());
+                    continue;
+                }
+                serv.library.ver = util::string::trim(serv_json["version"].GetString());
+
+                if (serv.library.ver.empty())
+                {
+                    serv.library.ver = "unknown";
+                }
+            }
+
+            rapidjson::Value& log_json = serv_json["log"];
+            if (log_json.HasMember("name"))
+            {
+                if (!log_json["name"].IsString())
+                {
+                    _logger->warn("service({}) is invalid: log.name is not string", serv.name.c_str());
+                    continue;
+                }
+                serv.log.name = util::string::trim(log_json["name"].GetString());
+            }
+
+            if (!log_json.HasMember("type"))
+            {
+                _logger->warn("service({}) is invalid: log.type is not provided", serv.name.c_str());
+                continue;
+            }
+            if (!log_json["type"].IsString())
+            {
+                _logger->warn("service({}) is invalid: log.type is not string", serv.name.c_str());
+                continue;
+            }
+            serv.log.type = util::string::trim(log_json["type"].GetString());
+
+            serv.log.level = "info";
+            if (log_json.HasMember("level"))
+            {
+                if (!log_json["level"].IsString())
+                {
+                    _logger->warn("service({}) is invalid: log.level is not string", serv.name.c_str());
+                    continue;
+                }
+                serv.log.level = util::string::trim(log_json["level"].GetString());
+            }
+
+            serv.log.keep = 7;
+            if (log_json.HasMember("keep"))
+            {
+                if (!log_json["keep"].IsNumber())
+                {
+                    _logger->warn("service({}) is invalid: log.keep is not number", serv.name.c_str());
+                    continue;
+                }
+                serv.log.keep = log_json["keep"].GetInt();
+            }
+
+            serv.log.size = 7;
+            if (log_json.HasMember("size"))
+            {
+                if (!log_json["size"].IsNumber())
+                {
+                    _logger->warn("service({}) is invalid: log.size is not number", serv.name.c_str());
+                    continue;
+                }
+                serv.log.size = log_json["size"].GetInt();
+            }
+
+            serv.status_code = 0;
+            serv.status_txt = Service_Status_Name[0];
+
+            _service_instances.emplace_back(serv);
+        }
+    } while (false);
+
+    return Service_Module_Success;
 }
 
 void HttpService::handle_service_list(struct mg_connection *nc, struct http_message *hm)
@@ -614,7 +820,7 @@ void HttpService::handle_service_list(struct mg_connection *nc, struct http_mess
 
         rapidjson::Value lib_json(rapidjson::kObjectType);
 
-        str_json.SetString(serv.library.path.c_str(), doc.GetAllocator());
+        str_json.SetString(serv.library.name.c_str(), doc.GetAllocator());
         lib_json.AddMember("path", str_json, doc.GetAllocator());
 
         str_json.SetString(serv.library.config.c_str(), doc.GetAllocator());
@@ -736,7 +942,7 @@ void HttpService::handle_definition_list(struct mg_connection *nc, struct http_m
 
         rapidjson::Value lib_json(rapidjson::kObjectType);
 
-        str_json.SetString(serv.library.path.c_str(), doc.GetAllocator());
+        str_json.SetString(serv.library.name.c_str(), doc.GetAllocator());
         lib_json.AddMember("path", str_json, doc.GetAllocator());
 
         str_json.SetString(serv.library.config.c_str(), doc.GetAllocator());
@@ -812,78 +1018,21 @@ void HttpService::handle_service_detail_get(struct mg_connection *nc, struct htt
                 serv_json.AddMember("description", str_json, doc.GetAllocator());
 
                 rapidjson::Value lib_json(rapidjson::kObjectType);
-                std::stringstream ss;
-
-                str_json.SetString(serv.library.path.c_str(), doc.GetAllocator());
-                lib_json.AddMember("path", str_json, doc.GetAllocator());
-                if (!serv.library.path.empty())
-                {
-                    ss << " --service.lib=" << serv.library.path;
-                }
+                str_json.SetString(serv.library.name.c_str(), doc.GetAllocator());
+                lib_json.AddMember("name", str_json, doc.GetAllocator());
 
                 str_json.SetString(serv.library.config.c_str(), doc.GetAllocator());
                 lib_json.AddMember("configuration", str_json, doc.GetAllocator());
-                if (!serv.library.config.empty())
-                {
-                    ss << " --service.config=" << serv.library.config;
-                }
 
                 str_json.SetString(serv.library.ver.c_str(), doc.GetAllocator());
                 lib_json.AddMember("version", str_json, doc.GetAllocator());
 
                 serv_json.AddMember("library", lib_json, doc.GetAllocator());
 
-                if (!serv.log.name.empty())
-                {
-                    ss << " --log.name=" << serv.log.name;
-                }
-
-                if (!serv.log.type.empty())
-                {
-                    ss << " --log.type=" << serv.log.type;
-                }
-                else
-                {
-                    ss << " --log.type=daily";
-                }
-
-                if (!serv.log.level.empty())
-                {
-                    ss << " --log.level=" << serv.log.level;
-                }
-                else
-                {
-                    ss << " --log.level=info";
-                }
-
-                if (serv.log.keep > 0)
-                {
-                    ss << " --log.keep=" << serv.log.keep;
-                }
-                else
-                {
-                    ss << " --log.keep=7";
-                }
-
-                if (serv.log.size > 0)
-                {
-                    ss << " --log.size=" << serv.log.size;
-                }
-                else
-                {
-                    ss << " --log.size=80";
-                }
-
-                str_json.SetString(ss.str().c_str(), doc.GetAllocator());
+                str_json.SetString(make_option(serv, false).c_str(), doc.GetAllocator());
                 serv_json.AddMember("option", str_json, doc.GetAllocator());
 
-                std::string real_path = serv.library.config;
-                if (_access(real_path.c_str(), 00) != 0)
-                {
-                    real_path = _root + real_path;
-                }
-
-                std::ifstream ifs(real_path);
+                std::ifstream ifs(_definitions_path + serv.id + "\\" + serv.library.config);
                 if (ifs.is_open())
                 {
                     std::string str;
@@ -930,78 +1079,21 @@ void HttpService::handle_service_detail_get(struct mg_connection *nc, struct htt
                 serv_json.AddMember("description", str_json, doc.GetAllocator());
 
                 rapidjson::Value lib_json(rapidjson::kObjectType);
-                std::stringstream ss;
-
-                str_json.SetString(serv.library.path.c_str(), doc.GetAllocator());
-                lib_json.AddMember("path", str_json, doc.GetAllocator());
-                if (!serv.library.path.empty())
-                {
-                    ss << " --service.lib=" << serv.library.path;
-                }
+                str_json.SetString(serv.library.name.c_str(), doc.GetAllocator());
+                lib_json.AddMember("name", str_json, doc.GetAllocator());
 
                 str_json.SetString(serv.library.config.c_str(), doc.GetAllocator());
                 lib_json.AddMember("configuration", str_json, doc.GetAllocator());
-                if (!serv.library.config.empty())
-                {
-                    ss << " --service.config=" << serv.library.config;
-                }
 
                 str_json.SetString(serv.library.ver.c_str(), doc.GetAllocator());
                 lib_json.AddMember("version", str_json, doc.GetAllocator());
 
                 serv_json.AddMember("library", lib_json, doc.GetAllocator());
 
-                if (!serv.log.name.empty())
-                {
-                    ss << " --log.name=" << serv.log.name;
-                }
-
-                if (!serv.log.type.empty())
-                {
-                    ss << " --log.type=" << serv.log.type;
-                }
-                else
-                {
-                    ss << " --log.type=daily";
-                }
-
-                if (!serv.log.level.empty())
-                {
-                    ss << " --log.level=" << serv.log.level;
-                }
-                else
-                {
-                    ss << " --log.level=info";
-                }
-
-                if (serv.log.keep > 0)
-                {
-                    ss << " --log.keep=" << serv.log.keep;
-                }
-                else
-                {
-                    ss << " --log.keep=7";
-                }
-
-                if (serv.log.size > 0)
-                {
-                    ss << " --log.size=" << serv.log.size;
-                }
-                else
-                {
-                    ss << " --log.size=80";
-                }
-
-                str_json.SetString(ss.str().c_str(), doc.GetAllocator());
+                str_json.SetString(make_option(serv, false).c_str(), doc.GetAllocator());
                 serv_json.AddMember("option", str_json, doc.GetAllocator());
-
-                std::string real_path = serv.library.config;
-                if (_access(real_path.c_str(), 00) != 0)
-                {
-                    real_path = _root + real_path;
-                }
-
-                std::ifstream ifs(real_path);
+                
+                std::ifstream ifs(_root + "conf\\" + serv.library.config);
                 if (ifs.is_open())
                 {
                     std::string str;
@@ -1088,16 +1180,16 @@ void HttpService::handle_service_detail_set(struct mg_connection *nc, struct htt
         }
 
         // find service definition
-        Service_t serv;
-        for (const Service_t& servd : _service_definitions)
+        Service_t* serv;
+        for (Service_t& servd : _service_definitions)
         {
             if (servd.id == index)
             {
-                serv = servd;
+                serv = &servd;
                 break;
             }
         }
-        if (serv.id.empty())
+        if (!serv)
         {
             ss << "Service definition(" << index << ") does not exist";
             res.SetString(ss.str().c_str(), doc.GetAllocator());
@@ -1105,96 +1197,39 @@ void HttpService::handle_service_detail_set(struct mg_connection *nc, struct htt
             break;
         }
 
-        bool existed = false;
+        serv = nullptr;
         // find existed service
-        for (const Service_t& servs : _service_instances)
+        for (Service_t& servs : _service_instances)
         {
             if (servs.name == name)
             {
-                ss << "Service(" << name << ") has already exist";
-                res.SetString(ss.str().c_str(), doc.GetAllocator());
-                code.SetInt(Service_Module_Failed);
-                existed = true;
+                serv = &servs;
                 break;
             }
         }
-        if (existed)
+        if (!serv)
         {
-            break;
-        }
-        serv.name = name;
-
-        if (!fresh_service_configuration(serv, configuration, res, doc.GetAllocator()))
-        {
-            break;
-        }
-
-        if (!parse_option(serv, option, res, doc.GetAllocator()))
-        {
-            break;
-        }
-
-        SC_HANDLE schSCManager = OpenSCManager(
-            NULL,                    // local computer
-            NULL,                    // ServicesActive database 
-            SC_MANAGER_ALL_ACCESS);  // full access rights 
-        if (NULL == schSCManager)
-        {
-            code.SetInt(Service_Module_Failed);
-            GetLastErrorString(res, doc.GetAllocator());
-            break;
-        }
-
-        std::vector<char> binary(1024);
-        snprintf(binary.data(), binary.size(), "%sServiceLoader.exe %s", _root.c_str(), option);
-        SC_HANDLE schService = CreateService(
-            schSCManager,              // SCM database 
-            name,                      // name of service 
-            name,                      // service name to display 
-            SERVICE_ALL_ACCESS,        // desired access 
-            SERVICE_WIN32_OWN_PROCESS, // service type 
-            SERVICE_AUTO_START,        // start type 
-            SERVICE_ERROR_NORMAL,      // error control type 
-            binary.data(),             // path to service's binary 
-            NULL,                      // no load ordering group 
-            NULL,                      // no tag identifier 
-            NULL,                      // no dependencies 
-            NULL,                      // LocalSystem account 
-            NULL);                     // no password 
-
-        if (schService == NULL)
-        {
-            GetLastErrorString(res, doc.GetAllocator());
-
-            CloseServiceHandle(schSCManager);
+            ss << "Service(" << name << ") does not exist";
+            res.SetString(ss.str().c_str(), doc.GetAllocator());
             code.SetInt(Service_Module_Failed);
             break;
         }
 
-        SERVICE_DESCRIPTION desc;
-        desc.lpDescription = (char*)serv.description.c_str();
-        if (!ChangeServiceConfig2(schService, SERVICE_CONFIG_DESCRIPTION, &desc))
+        Service_t tmp = *serv;
+        if (!parse_option(tmp, option, res, doc.GetAllocator()))
         {
-            GetLastErrorString(res, doc.GetAllocator());
-            code.SetInt(Service_Module_Failed);
-
-            // delete service
-            DeleteService(schService);
-
-            CloseServiceHandle(schService);
-            CloseServiceHandle(schSCManager);
             break;
         }
 
-        CloseServiceHandle(schService);
-        CloseServiceHandle(schSCManager);
+        if (!create_service_configuration(tmp, configuration, res, doc.GetAllocator()))
+        {
+            break;
+        }
+
+        *serv = tmp;
 
         code.SetInt(Service_Module_Success);
         res.SetString("success", doc.GetAllocator());
-
-        _service_instances.push_back(serv);
-
-        fresh_services_json(_service_instances, _services_path);
     } while (false);
 
     doc.AddMember("code", code, doc.GetAllocator());
@@ -1277,12 +1312,12 @@ void HttpService::handle_service_create(struct mg_connection *nc, struct http_me
         }
         serv.name = name;
 
-        if (!fresh_service_configuration(serv, configuration, res, doc.GetAllocator()))
+        if (!parse_option(serv, option, res, doc.GetAllocator()))
         {
             break;
         }
-        
-        if (!parse_option(serv, option, res, doc.GetAllocator()))
+
+        if (!create_service_configuration(serv, configuration, res, doc.GetAllocator()))
         {
             break;
         }
@@ -1299,7 +1334,7 @@ void HttpService::handle_service_create(struct mg_connection *nc, struct http_me
         }
 
         std::vector<char> binary(1024);
-        snprintf(binary.data(), binary.size(), "%sServiceLoader.exe %s", _root.c_str(), option);
+        snprintf(binary.data(), binary.size(), "%sServiceLoader.exe %s", _root.c_str(), make_option(serv, true).c_str());
         SC_HANDLE schService = CreateService(
             schSCManager,              // SCM database 
             name,                      // name of service 
@@ -1457,7 +1492,25 @@ void HttpService::handle_service_delete(struct mg_connection *nc, struct http_me
             res.SetString("success", doc.GetAllocator());
 
             std::string lame = name;
-            _service_instances.erase(std::remove_if(_service_instances.begin(), _service_instances.end(), [&lame](const Service_t& el) { return el.name == lame; }));
+            _service_instances.erase(std::remove_if(_service_instances.begin(), _service_instances.end(), [&lame, this](const Service_t& el) 
+            { 
+                if (el.name == lame)
+                {
+                    if (!el.library.config.empty())
+                    {
+                        std::string config_path = _root + "conf\\" + el.library.config;
+                        if (_access(config_path.c_str(), 00) == 0)
+                        {
+                            if (remove(config_path.c_str()) != 0)
+                            {
+                                _logger->warn("delete service({}) configuration file({}) failed: {}", el.name.c_str(), el.library.config.c_str(), GetLastErrorString().c_str());
+                            }
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            }));
             fresh_services_json(_service_instances, _services_path);
         }
 
@@ -1586,11 +1639,6 @@ void HttpService::handle_service_control(struct mg_connection *nc, struct http_m
     mg_send_http_chunk(nc, "", 0); /* Send empty chunk, the end of response */
 }
 
-void HttpService::handle_service_upgrade(struct mg_connection *nc, struct http_message *hm)
-{
-    
-}
-
 void HttpService::handle_html(struct mg_connection *nc, struct http_message *hm)
 {
     if (mg_vcmp(&hm->uri, "/") == 0)
@@ -1624,18 +1672,14 @@ bool HttpService::fresh_services_json(const Services_t& services, const std::str
         str_json.SetString(serv.description.c_str(), doc.GetAllocator());
         serv_json.AddMember("description", str_json, doc.GetAllocator());
 
-        rapidjson::Value lib_json(rapidjson::kObjectType);
-
-        str_json.SetString(serv.library.path.c_str(), doc.GetAllocator());
-        lib_json.AddMember("path", str_json, doc.GetAllocator());
+        str_json.SetString(serv.library.name.c_str(), doc.GetAllocator());
+        serv_json.AddMember("library", str_json, doc.GetAllocator());
 
         str_json.SetString(serv.library.config.c_str(), doc.GetAllocator());
-        lib_json.AddMember("configuration", str_json, doc.GetAllocator());
+        serv_json.AddMember("configuration", str_json, doc.GetAllocator());
 
         str_json.SetString(serv.library.ver.c_str(), doc.GetAllocator());
-        lib_json.AddMember("version", str_json, doc.GetAllocator());
-
-        serv_json.AddMember("library", lib_json, doc.GetAllocator());
+        serv_json.AddMember("version", str_json, doc.GetAllocator());
 
         rapidjson::Value log_json(rapidjson::kObjectType);
         str_json.SetString(serv.log.name.c_str(), doc.GetAllocator());
@@ -1764,11 +1808,68 @@ bool HttpService::parse_option(Service_t& serv, const std::string& options, rapi
     return everything_is_fine;
 }
 
-bool HttpService::fresh_service_configuration(const Service_t& serv, const std::vector<char>& configuration, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+std::string HttpService::make_option(const Service_t& serv, bool make_service_opt)
+{
+    std::stringstream ss;
+    if (make_service_opt)
+    {
+        ss << " --service.lib=services\\" << serv.id << "\\" << serv.library.name;
+        ss << " --service.config=conf\\" << serv.library.config;
+    }
+    else
+    {
+        ss << " --service.config=" << serv.library.config;
+    }
+
+    if (!serv.log.name.empty())
+    {
+        ss << " --log.name=" << serv.log.name;
+    }
+
+    if (!serv.log.type.empty())
+    {
+        ss << " --log.type=" << serv.log.type;
+    }
+    else
+    {
+        ss << " --log.type=daily";
+    }
+
+    if (!serv.log.level.empty())
+    {
+        ss << " --log.level=" << serv.log.level;
+    }
+    else
+    {
+        ss << " --log.level=info";
+    }
+
+    if (serv.log.keep > 0)
+    {
+        ss << " --log.keep=" << serv.log.keep;
+    }
+    else
+    {
+        ss << " --log.keep=7";
+    }
+
+    if (serv.log.size > 0)
+    {
+        ss << " --log.size=" << serv.log.size;
+    }
+    else
+    {
+        ss << " --log.size=80";
+    }
+
+    return ss.str();
+}
+
+bool HttpService::create_service_configuration(const Service_t& serv, const std::vector<char>& configuration, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
 {
     if (!serv.library.config.empty())
     {
-        std::ofstream ofs(_root + serv.library.config);
+        std::ofstream ofs(_root + "conf\\" + serv.library.config);
         if (ofs.is_open())
         {
             ofs.write(configuration.data(), configuration.size());
@@ -1783,5 +1884,49 @@ bool HttpService::fresh_service_configuration(const Service_t& serv, const std::
         }
     }
     return true;
+}
+
+bool HttpService::begin_upload_package()
+{
+    if (_package.is_open())
+    {
+        _package.close();
+    }
+
+    std::string package_path(_root + "tmp\\");
+    if (_access(package_path.c_str(), 00) != 0 && _mkdir(package_path.c_str()) != 0)
+    {
+        _logger->error("upload package failed: upload directory(tmp\\) does not exist");
+        return false;
+    }
+
+    _package.open(package_path + "upgrade.tar.gz", std::ios::binary);
+    if (!_package.is_open())
+    {
+        _logger->error("upload package failed: open upgrade package(tmp\\upgrade.tar.gz) failed");
+        return false;
+    }
+    return true;
+}
+
+bool HttpService::write_upload_package(const char* data, size_t len)
+{
+    if (_package.is_open())
+    {
+        _package.write(data, len);
+        return true;
+    }
+    return false;
+}
+
+long HttpService::end_upload_package()
+{
+    long len = 0L;
+    if (_package.is_open())
+    {
+        len = (long)_package.tellp();
+        _package.close();
+    }
+    return len;
 }
 

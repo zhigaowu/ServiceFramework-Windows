@@ -14,11 +14,9 @@
 
 HttpService http;
 
-#define SERVICE_DEFINITION_FILE_KEY "service.definition.file"
-#define SERVICES_FILE_KEY "services.file"
-
-#define SERVICE_DEFINITION_FILE_VALUE "data\\ServiceDefinition.json"
-#define SERVICES_FILE_VALUE "conf\\Services.json"
+#define SERVICE_HTTP_DIRECTORY "http\\"
+#define SERVICE_DEFINITION_DIRECTORY "services\\"
+#define SERVICES_FILE_VALUE "data\\Services.json"
 
 SERVICE_MODULE_C_API int __cdecl Service_Create(std::shared_ptr<spdlog::logger>& log, const std::string& root, const std::string& config_file_path)
 {
@@ -26,7 +24,7 @@ SERVICE_MODULE_C_API int __cdecl Service_Create(std::shared_ptr<spdlog::logger>&
     {
         if (config_file_path.empty())
         {
-            return http.Create("", 8180, root + "http\\", root + SERVICE_DEFINITION_FILE_VALUE, root + SERVICES_FILE_VALUE, root, log);
+            return http.Create("", 8180, root + SERVICE_HTTP_DIRECTORY, root + SERVICE_DEFINITION_DIRECTORY, root + SERVICES_FILE_VALUE, root, log);
         }
 
         std::ifstream ifs(config_file_path);
@@ -63,7 +61,7 @@ SERVICE_MODULE_C_API int __cdecl Service_Create(std::shared_ptr<spdlog::logger>&
         }
         int port = doc["port"].GetInt();
 
-        std::string directory = "http\\";
+        std::string directory = SERVICE_HTTP_DIRECTORY;
         if (doc.HasMember("directory"))
         {
             if (!doc["directory"].IsString())
@@ -75,38 +73,6 @@ SERVICE_MODULE_C_API int __cdecl Service_Create(std::shared_ptr<spdlog::logger>&
 
             std::for_each(directory.begin(), directory.end(), [](char& ch) { ch = ch == '/' ? '\\' : ch; });
         }
-
-        std::string service_def_file = SERVICE_DEFINITION_FILE_VALUE;
-        if (doc.HasMember(SERVICE_DEFINITION_FILE_KEY))
-        {
-            if (!doc[SERVICE_DEFINITION_FILE_KEY].IsString())
-            {
-                log->error("create http service failed: http service definition file should be string");
-                break;
-            }
-            service_def_file = doc[SERVICE_DEFINITION_FILE_KEY].GetString();
-
-            std::for_each(service_def_file.begin(), service_def_file.end(), [](char& ch) { ch = ch == '/' ? '\\' : ch; });
-        }
-        else
-        {
-            log->error("create http service failed: http service definition file does not exist");
-            break;
-        }
-
-        std::string services_file = SERVICES_FILE_VALUE;
-        if (doc.HasMember(SERVICES_FILE_KEY))
-        {
-            if (!doc[SERVICES_FILE_KEY].IsString())
-            {
-                log->error("create http service failed: http services file should be string");
-                break;
-            }
-            services_file = doc[SERVICES_FILE_KEY].GetString();
-
-            std::for_each(services_file.begin(), services_file.end(), [](char& ch) { ch = ch == '/' ? '\\' : ch; });
-        }
-
         directory = root + directory;
         if (_access(directory.c_str(), 00) != 0 && _mkdir(directory.c_str()) != 0)
         {
@@ -114,16 +80,7 @@ SERVICE_MODULE_C_API int __cdecl Service_Create(std::shared_ptr<spdlog::logger>&
             break;
         }
 
-        service_def_file = root + service_def_file;
-        if (_access(service_def_file.c_str(), 00) != 0)
-        {
-            log->error("create http service failed: service definition file({}) does not exist", service_def_file.c_str());
-            break;
-        }
-
-        services_file = root + services_file;
-
-        return http.Create(address, port, directory, service_def_file, services_file, root, log);
+        return http.Create(address, port, directory, root + SERVICE_DEFINITION_DIRECTORY, root + SERVICES_FILE_VALUE, root, log);
     } while (false);
 
     return Service_Module_Failed;

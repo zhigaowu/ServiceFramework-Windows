@@ -44,13 +44,27 @@
       </tbody>
       <tfoot>        
         <tr>
-          <td>
+          <td colspan="2">
+            <form method="post" id="upload-package-form" name="upload-package-form" onsubmit="return UploadPackage();">
+              <!--div class="custom-file mt-3 mb-3"-->
+                <input type="file" id="file" name="file" required>
+                <!--label class="custom-file-label selected" for="customFile">Choose package</label-->
+                <div id="upload-progress">Example invalid custom file feedback</div>
+              <!--/div-->
+              <input type="submit" id="upload-package-submit">
+              <!--a class="btn btn-primary btn-sm" href="#" onclick="ClickUpload()">
+                <i class="fa fa-upload">
+                </i>
+                Upload
+              </a-->
+            </form>
           </td>
           <td>
-          </td>
-          <td>
-          </td>
-          <td>
+            <a class="btn btn-primary btn-sm" href="#">
+              <i class="fa fa-arrow-up">
+              </i>
+              Upgrade
+            </a>
           </td>
           <td class="project-actions text-right">
             <a class="btn btn-primary btn-sm" data-toggle="modal" data-target="#AddServiceDialog" data-backdrop="static" data-keyboard="false" href="#">
@@ -69,7 +83,7 @@
         
           <!-- Modal Header -->
           <div class="modal-header">
-            <h4 class="modal-title">Add Service</h4>
+            <h4 class="modal-title">Select Service Template</h4>
             <button type="button" class="close" data-dismiss="modal">&times;</button>
           </div>
           
@@ -106,7 +120,7 @@
     </div>
     
     <!-- The Edit Modal -->
-    <div class="modal" id="EditServiceDialog">
+    <div class="modal" id="ServiceInformationDialog">
       <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
         <div class="modal-content">
         
@@ -175,18 +189,63 @@
   <script src="js/toastr.min.js"></script>
   <script src="js/bootstrap.min.js"></script>
   <script>
+    $(document).ready(function() {
+      $(window).keydown(function(event){
+        if(event.keyCode == 116) {
+          event.preventDefault();
+          return false;
+        }
+      });
+    });
+    
     var status_background_class_types = ["badge-dark", "badge-danger", "badge-warning", "badge-warning", "badge-success"];
     var status_link_class_types = ["disabled", "enabled", "disabled", "disabled", "enabled"];
     var status_action_types = ["Start", "Start", "Stop", "Start", "Stop"];
     
+    function ClickUpload()
+    {
+      jQuery('#upload-package-submit').click();
+    }
+    
+    function UpdateUploadProgress(evt) 
+    {
+      if (evt.lengthComputable) 
+      {
+        document.getElementById("upload-progress").textContent = "Uploaded " + evt.loaded + " of " + evt.total + " bytes";
+      }
+    }
+    
+    function UploadPackage() {
+      var file_data = new FormData(document.getElementById('upload-package-form'));
+      $.ajax({
+        url: "/service/upload",
+        type: "POST",
+        data: file_data,
+        processData: false,
+        contentType: false,
+        cache: false,
+        xhr: function() 
+        {
+          myXhr = $.ajaxSettings.xhr();
+          if(myXhr.upload){
+            myXhr.upload.addEventListener('progress', UpdateUploadProgress, false); // for handling the progress of the upload
+          }
+          return myXhr;
+        },
+      }).done(function(data) {
+          document.getElementById("upload-progress").textContent = "Result: " + data;
+      });
+      return false;
+    }
+    
     function EnableAddServiceOKButton() {
       $('#AddServiceOK').prop('disabled', false);
     }
-    function ShowEditServiceDialog() {
+    function ShowServiceInformationDialog() {
       $('#ServiceType').val('service');
-      var modal = $('#EditServiceDialog');
-      modal.find('.modal-title').text('Edit Service');
-      modal.find('#EditServiceOK').text('Save');
+      var modal = $('#ServiceInformationDialog');
+      modal.find('.modal-title').text('View Service');
+      modal.find('#EditServiceOK').text('OK');
       modal.modal({backdrop: 'static', keyboard: false});
     }
     
@@ -281,11 +340,11 @@
                   <span class="badge ${status_background_class}">${obj.status_txt}</span>
                 </td>
                 <td class="service-actions text-right">
-                  <!--a class="btn btn-info btn-sm" onclick="ShowEditServiceDialog()" href="#">
-                    <i class="fa fa-pencil">
+                  <a class="btn btn-info btn-sm" onclick="ShowServiceInformationDialog()" href="#">
+                    <i class="fa fa-eye">
                     </i>
-                    Edit
-                  </a-->
+                    View
+                  </a>
                   <input type="hidden" value="${status_action}"/>
                   <a class="btn btn-primary btn-sm ${status_link_class}" onclick="OperateService(this)" href="#">
                     <i class="fa fa-play">
@@ -344,7 +403,7 @@
                   </small>
                 </td>
                 <td class="project-actions text-right">
-                  <input type="radio" name="ServiceGroupName" value="${obj.id}" onclick="EnableAddServiceOKButton()" aria-label="Radio button for following text input"/>
+                  <input type="radio" name="ServiceGroupName" value="${obj.id}" onclick="EnableAddServiceOKButton()" aria-label="click to use this as the service template"/>
                 </td>
               </tr>`
             );
@@ -356,16 +415,20 @@
       });
     }
     
-    function InitEditServiceDialog()
+    function InitServiceInformationDialog()
     {
       var stype = $('#ServiceType').val();
       if ("definition" == stype) {
         $('#TextServiceName').prop('disabled', false);
+        $('#TextServiceOption').prop('disabled', false);
+        $('#TextServiceViwer').prop('disabled', false);
       } else {
         $('#TextServiceName').prop('disabled', true);
+        $('#TextServiceOption').prop('disabled', true);
+        $('#TextServiceViwer').prop('disabled', true);
       }
       
-      $('#EditServiceDialog').trigger('focus');
+      $('#ServiceInformationDialog').trigger('focus');
       
       $.ajax({
         url: '/service/detail/get',
@@ -409,7 +472,7 @@
           success: function(json) {
             if (json.code == 0) {
               toastr.success('Create service success');
-              $('#EditServiceDialog').modal('hide');
+              $('#ServiceInformationDialog').modal('hide');
               LoadServices();
             } else {
               toastr.error(json.result);
@@ -420,29 +483,7 @@
           }
         });
       } else {          
-        $.ajax({
-          url: '/service/detail/set',
-          method: 'POST',
-          dataType: 'json',
-          data: {
-            'type': stype, 
-            'index': $('#ServiceIndex').val(),
-            'name': $('#TextServiceName').val(),
-            'option': $('#TextServiceOption').val(),
-            'configuration': $('#TextServiceViwer').val()
-          },
-          success: function(json) {
-            if (json.code == 0) {
-              toastr.success('Save service configuration success');
-              $('#EditServiceDialog').modal('hide');
-            } else {
-              toastr.error(json.result);
-            }              
-          },
-          error: function (jqXHR, textStatus, errorThrown) {
-            toastr.error(textStatus + jqXHR.responseText);
-          }
-        });
+        $('#ServiceInformationDialog').modal('hide');
       }
     }
     
@@ -460,13 +501,13 @@
         
         $('#ServiceType').val('definition');
         
-        var modal = $('#EditServiceDialog');
+        var modal = $('#ServiceInformationDialog');
         modal.find('.modal-title').text('Install Service');
         modal.find('#EditServiceOK').text('Install');
         modal.modal({backdrop: 'static', keyboard: false});
       });
       
-      $('#EditServiceDialog').on('shown.bs.modal', InitEditServiceDialog);
+      $('#ServiceInformationDialog').on('shown.bs.modal', InitServiceInformationDialog);
       
       $('#EditServiceOK').on('click', SubmitServiceChange);
       

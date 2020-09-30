@@ -145,22 +145,24 @@
     </Link>
     <PreBuildEvent>
       <Command>if exist "$(ProjectDir)lib\$(ProjectName).pdb" (del /s /f "$(ProjectDir)lib\$(ProjectName).pdb")
-if exist "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName).pdb" (del /s /f "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName).pdb")
-if exist "$(SolutionDir)TestCases\bin\services\$(ProjectName).pdb" (del /s /f "$(SolutionDir)TestCases\bin\services\$(ProjectName).pdb")</Command>
+if exist "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\$(ProjectName).pdb" (del /s /f "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\$(ProjectName).pdb")
+if exist "$(SolutionDir)TestCases\bin\services\$(ProjectName)\$(ProjectName).pdb" (del /s /f "$(SolutionDir)TestCases\bin\services\$(ProjectName)\$(ProjectName).pdb")</Command>
     </PreBuildEvent>
     <PostBuildEvent>
-      <Command>if exist "$(ProjectDir)lib\$(ProjectName).pdb" (copy /y "$(ProjectDir)lib\$(ProjectName).pdb" "$(SolutionDir)TestCases\bin\services\")
-if exist "$(ProjectDir)lib\$(ProjectName).pdb" (copy /y "$(ProjectDir)lib\$(ProjectName).pdb" "$(SolutionDir)ServiceLoader\bin\services\")
+      <Command>if not exist "$(SolutionDir)TestCases\bin\services\$(ProjectName)" (mkdir "$(SolutionDir)TestCases\bin\services\$(ProjectName)")
+if not exist "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)" (mkdir "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)")
 
-if exist "$(ProjectDir)lib\$(ProjectName).dll" (copy /y "$(ProjectDir)lib\$(ProjectName).dll" "$(SolutionDir)TestCases\bin\services\")
-if exist "$(ProjectDir)lib\$(ProjectName).dll" (copy /y "$(ProjectDir)lib\$(ProjectName).dll" "$(SolutionDir)ServiceLoader\bin\services\")
+if exist "$(ProjectDir)lib\$(ProjectName).pdb" (copy /y "$(ProjectDir)lib\$(ProjectName).pdb" "$(SolutionDir)TestCases\bin\services\$(ProjectName)\")
+if exist "$(ProjectDir)lib\$(ProjectName).pdb" (copy /y "$(ProjectDir)lib\$(ProjectName).pdb" "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\")
 
-copy /y "$(ProjectDir)conf\ServiceSample1.xml" "$(SolutionDir)ServiceLoader\bin\conf\ServiceSample1.xml"
-copy /y "$(ProjectDir)conf\ServiceSample2.xml" "$(SolutionDir)ServiceLoader\bin\conf\ServiceSample2.xml"
-copy /y "$(ProjectDir)conf\ServiceSample3.xml" "$(SolutionDir)ServiceLoader\bin\conf\ServiceSample3.xml"
-copy /y "$(ProjectDir)conf\ServiceSample1.xml" "$(SolutionDir)TestCases\bin\conf\ServiceSample1.xml"
-copy /y "$(ProjectDir)conf\ServiceSample2.xml" "$(SolutionDir)TestCases\bin\conf\ServiceSample2.xml"
-copy /y "$(ProjectDir)conf\ServiceSample3.xml" "$(SolutionDir)TestCases\bin\conf\ServiceSample3.xml"</Command>
+if exist "$(ProjectDir)lib\$(ProjectName).dll" (copy /y "$(ProjectDir)lib\$(ProjectName).dll" "$(SolutionDir)TestCases\bin\services\$(ProjectName)\")
+if exist "$(ProjectDir)lib\$(ProjectName).dll" (copy /y "$(ProjectDir)lib\$(ProjectName).dll" "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\")
+
+copy /y "$(ProjectDir)conf\prototype.json" "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\prototype.json"
+copy /y "$(ProjectDir)conf\prototype.json" "$(SolutionDir)TestCases\bin\services\$(ProjectName)\prototype.json"
+
+copy /y "$(ProjectDir)conf\ServiceSample.xml" "$(SolutionDir)ServiceLoader\bin\services\$(ProjectName)\ServiceSample.xml"
+copy /y "$(ProjectDir)conf\ServiceSample.xml" "$(SolutionDir)TestCases\bin\services\$(ProjectName)\ServiceSample.xml"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

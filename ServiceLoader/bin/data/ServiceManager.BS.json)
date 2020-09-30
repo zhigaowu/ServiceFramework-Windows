@@ -1,7 +1,0 @@
-{
-  "address": "",
-  "port": 8180,
-  "directory": "http/",
-  "service.definition.file": "data/ServiceDefinition.json",
-  "services.file": "conf/Services.json"
-}

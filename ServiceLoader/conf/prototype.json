@@ -1,0 +1,15 @@
+{
+  "name": "The Management Service",
+  "description": "The web http service that manage all the other service",
+  "library": "ServiceManager.BS.dll",
+  "configuration": "ServiceManager.BS.json",
+  "version": "1.0.0",
+  "log": {
+    "name": "",
+    "level": "info",
+    "type": "daily",
+    "keep": 10,
+    "size": 80
+  }
+}
+

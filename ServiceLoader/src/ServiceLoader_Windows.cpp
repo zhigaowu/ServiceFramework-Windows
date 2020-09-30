@@ -22,7 +22,7 @@ static struct
     HANDLE                event = INVALID_HANDLE_VALUE;
 } service;
 
-#define SERVICE_NAME  ("My Sample Service")  
+#define SERVICE_NAME  ("WindowsServiceLoader")  
 
 static std::string GetLastErrorString()
 {

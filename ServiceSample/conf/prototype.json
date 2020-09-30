@@ -1,0 +1,15 @@
+{
+  "name": "The Sample Service",
+  "description": "The sample service that indicates how to define a service",
+  "library": "ServiceSample.dll",
+  "configuration": "ServiceSample.xml",
+  "version": "1.0.0",
+  "log": {
+    "name": "",
+    "level": "info",
+    "type": "daily",
+    "keep": 10,
+    "size": 80
+  }
+}
+

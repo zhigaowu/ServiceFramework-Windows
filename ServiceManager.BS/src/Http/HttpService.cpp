@@ -12,7 +12,9 @@
 #include <sstream>
 #include <regex>
 
-static const char* Service_Prototype_File = "\\prototype.json";
+static const char* Service_Prototype_File = "prototype.json";
+static const char* Service_Upgrade_File = "upgrade.zip";
+static const char* Service_Tmp_Dir = "tmp\\";
 
 static char Service_Status_Name[][16] = {
     "Unknown",
@@ -269,7 +271,7 @@ static void ev_upload(struct mg_connection *nc, int ev, void *p)
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/plain\r\n"
             "Connection: close\r\n\r\n"
-            "Written %ld of POST data to a temp file\n\n",
+            "Uploaded %ld of package(done)\n\n",
             http->end_upload_package());
         nc->flags |= MG_F_SEND_AND_CLOSE;
         break;
@@ -313,6 +315,10 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
         else if (mg_vcmp(&hm->uri, "/service/control") == 0)
         {
             http->handle_service_control(nc, hm); /* Handle RESTful call */
+        }
+        else if (mg_vcmp(&hm->uri, "/service/upgrade") == 0)
+        {
+            http->handle_service_upgrade(nc, hm); /* Handle RESTful call */
         }
         else
         {
@@ -414,7 +420,7 @@ int HttpService::load_service_definitions()
             }
 
             // check service definition file
-            std::ifstream ifs(_definitions_path + serv.id + Service_Prototype_File);
+            std::ifstream ifs(_definitions_path + serv.id + "\\" + Service_Prototype_File);
             if (ifs.is_open())
             {
                 ifs.seekg(0, std::ios::end);
@@ -1639,6 +1645,48 @@ void HttpService::handle_service_control(struct mg_connection *nc, struct http_m
     mg_send_http_chunk(nc, "", 0); /* Send empty chunk, the end of response */
 }
 
+void HttpService::handle_service_upgrade(struct mg_connection *nc, struct http_message *hm)
+{
+    rapidjson::Document doc(rapidjson::kObjectType);
+    rapidjson::Value code(rapidjson::kNumberType);
+    rapidjson::Value res(rapidjson::kStringType);
+
+    do
+    {
+        struct archive *ar = open_package(code, res, doc.GetAllocator());
+        if (!ar)
+        {
+            break;
+        }
+
+        std::list<std::string> related_definitions = parse_dependent_service_definitions(ar);
+        if (!stop_dependent_services(related_definitions, code, res, doc.GetAllocator()) ||
+            !upgrade_dependent_services(ar, code, res, doc.GetAllocator()) ||
+            !start_dependent_services(related_definitions, code, res, doc.GetAllocator()))
+        {
+            close_package(ar);
+            break;
+        }
+
+        code.SetInt(Service_Module_Success);
+        res.SetString("success", doc.GetAllocator());
+
+        close_package(ar);
+    } while (false);
+
+    doc.AddMember("code", code, doc.GetAllocator());
+    doc.AddMember("result", res, doc.GetAllocator());
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    doc.Accept(writer);
+
+    const char* json = buffer.GetString();
+    mg_printf(nc, "%s", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+    mg_send_http_chunk(nc, json, strlen(json));
+    mg_send_http_chunk(nc, "", 0); /* Send empty chunk, the end of response */
+}
+
 void HttpService::handle_html(struct mg_connection *nc, struct http_message *hm)
 {
     if (mg_vcmp(&hm->uri, "/") == 0)
@@ -1893,17 +1941,17 @@ bool HttpService::begin_upload_package()
         _package.close();
     }
 
-    std::string package_path(_root + "tmp\\");
+    std::string package_path(_root + Service_Tmp_Dir);
     if (_access(package_path.c_str(), 00) != 0 && _mkdir(package_path.c_str()) != 0)
     {
-        _logger->error("upload package failed: upload directory(tmp\\) does not exist");
+        _logger->error("upload package failed: upload directory({}) does not exist", Service_Tmp_Dir);
         return false;
     }
 
-    _package.open(package_path + "upgrade.tar.gz", std::ios::binary);
+    _package.open(package_path + Service_Upgrade_File, std::ios::binary);
     if (!_package.is_open())
     {
-        _logger->error("upload package failed: open upgrade package(tmp\\upgrade.tar.gz) failed");
+        _logger->error("upload package failed: open upgrade package({}{}) failed", Service_Tmp_Dir, Service_Upgrade_File);
         return false;
     }
     return true;
@@ -1928,5 +1976,223 @@ long HttpService::end_upload_package()
         _package.close();
     }
     return len;
+}
+
+struct archive* HttpService::open_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    struct archive *ar = nullptr;
+    do 
+    {
+        std::string package_path(_root + Service_Tmp_Dir + Service_Upgrade_File);
+        if (_access(package_path.c_str(), 00) != 0)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Upgrade package not found", allo);
+            break;
+        }
+
+        ar = archive_read_new();
+        if (!ar)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Unsupported package type", allo);
+            break;
+        }
+
+        archive_read_support_filter_all(ar);
+        archive_read_support_format_all(ar);
+
+        int r = archive_read_open_filename(ar, package_path.c_str(), 10240); // Note 1
+        if (r != ARCHIVE_OK)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Unsupported package format", allo);
+            break;
+        }
+    } while (false);
+
+    return ar;
+}
+
+std::list<std::string> HttpService::parse_dependent_service_definitions(struct archive* ar)
+{
+    std::list<std::string> related_definitions;
+    struct archive_entry *entry = nullptr;
+    while (archive_read_next_header(ar, &entry) == ARCHIVE_OK) 
+    {
+        related_definitions.emplace_back(archive_entry_pathname(entry));
+        archive_read_data_skip(ar);  // Note 2
+    }
+    return related_definitions;
+}
+
+bool HttpService::stop_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    do
+    {
+        code.SetInt(Service_Module_Success);
+
+        SC_HANDLE schSCManager = OpenSCManager(
+            NULL,                    // local computer
+            NULL,                    // ServicesActive database
+            SC_MANAGER_ALL_ACCESS);  // full access rights
+        if (NULL == schSCManager)
+        {
+            code.SetInt(Service_Module_Failed);
+            GetLastErrorString(err, allo);
+            break;
+        }
+
+        SERVICE_STATUS_PROCESS ssStatus;
+        DWORD dwBytesNeeded;
+        for (const Service_t& serv : _service_instances)
+        {
+            std::list<std::string>::const_iterator found = std::find_if(related_definitions.begin(), related_definitions.end(), [&serv](const std::string& id) { return serv.id == id; });
+            if (related_definitions.end() == found)
+            {
+                continue;
+            }
+
+            SC_HANDLE schService = OpenService(
+                schSCManager,              // SCM database
+                serv.name.c_str(),         // name of service
+                SERVICE_ALL_ACCESS);       // desired access
+
+            if (schService == NULL)
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                break;
+            }
+            
+            if (!QueryServiceStatusEx(
+                schService,                     // handle to service 
+                SC_STATUS_PROCESS_INFO,         // information level
+                (LPBYTE)&ssStatus,             // address of structure
+                sizeof(SERVICE_STATUS_PROCESS), // size of structure
+                &dwBytesNeeded))              // size needed if buffer is too small
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                CloseServiceHandle(schService);
+                break;
+            }
+
+            if (ssStatus.dwCurrentState != SERVICE_STOPPED && ssStatus.dwCurrentState != SERVICE_STOP_PENDING)
+            {
+                SERVICE_STATUS_PROCESS ssp;
+                if (!ControlService(
+                    schService,
+                    SERVICE_CONTROL_STOP,
+                    (LPSERVICE_STATUS)&ssp))
+                {
+                    code.SetInt(Service_Module_Failed);
+                    GetLastErrorString(err, allo);
+                }
+            }
+            
+            CloseServiceHandle(schService);
+        }
+
+        CloseServiceHandle(schSCManager);
+
+    } while (false);
+
+    return code.GetInt() == Service_Module_Success;
+}
+
+bool HttpService::upgrade_dependent_services(struct archive* ar, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    return true;
+}
+
+bool HttpService::start_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    do
+    {
+        code.SetInt(Service_Module_Success);
+
+        SC_HANDLE schSCManager = OpenSCManager(
+            NULL,                    // local computer
+            NULL,                    // ServicesActive database
+            SC_MANAGER_ALL_ACCESS);  // full access rights
+        if (NULL == schSCManager)
+        {
+            code.SetInt(Service_Module_Failed);
+            GetLastErrorString(err, allo);
+            break;
+        }
+
+        SERVICE_STATUS_PROCESS ssStatus;
+        DWORD dwBytesNeeded;
+        for (const Service_t& serv : _service_instances)
+        {
+            std::list<std::string>::const_iterator found = std::find_if(related_definitions.begin(), related_definitions.end(), [&serv](const std::string& id) { return serv.id == id; });
+            if (related_definitions.end() == found)
+            {
+                continue;
+            }
+
+            SC_HANDLE schService = OpenService(
+                schSCManager,              // SCM database
+                serv.name.c_str(),         // name of service
+                SERVICE_ALL_ACCESS);       // desired access
+
+            if (schService == NULL)
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                break;
+            }
+
+            if (!QueryServiceStatusEx(
+                schService,                     // handle to service 
+                SC_STATUS_PROCESS_INFO,         // information level
+                (LPBYTE)&ssStatus,             // address of structure
+                sizeof(SERVICE_STATUS_PROCESS), // size of structure
+                &dwBytesNeeded))              // size needed if buffer is too small
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                CloseServiceHandle(schService);
+                break;
+            }
+
+            if (ssStatus.dwCurrentState != SERVICE_START && ssStatus.dwCurrentState != SERVICE_START_PENDING)
+            {
+                if (!StartService(
+                    schService,
+                    0,
+                    NULL))
+                {
+                    code.SetInt(Service_Module_Failed);
+                    GetLastErrorString(err, allo);
+                }
+            }
+
+            CloseServiceHandle(schService);
+        }
+
+        CloseServiceHandle(schSCManager);
+
+    } while (false);
+
+    return code.GetInt() == Service_Module_Success;
+}
+
+void HttpService::close_package(struct archive* ar)
+{
+    if (ar)
+    {
+        int r = archive_read_free(ar);  // Note 3
+        if (ARCHIVE_OK != r)
+        {
+            _logger->warn("free archive failed: {}", archive_error_string(ar));
+        }
+    }
 }
 

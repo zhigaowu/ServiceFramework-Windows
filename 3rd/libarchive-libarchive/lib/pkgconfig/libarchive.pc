@@ -1,0 +1,12 @@
+prefix=E:/Workbench/local/ServiceFramework-Windows/3rd/libarchive-libarchive-v3.4.3/install
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libarchive
+Description: library that can create and read several streaming archive formats
+Version: 3.4.4dev
+Cflags: -I${includedir}
+Cflags.private: -DLIBARCHIVE_STATIC
+Libs: -L${libdir} -larchive
+Libs.private:  -lz -lbzip2 -llzma -llz4 -lzstd -lBcrypt -lcrypto -lcharset -lxml2 -lssl

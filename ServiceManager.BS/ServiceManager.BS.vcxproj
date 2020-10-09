@@ -135,13 +135,15 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;_USRDLL;SERVICEMANAGERBS_EXPORTS;MG_ENABLE_HTTP_STREAMING_MULTIPART;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(SolutionDir)3rd;$(SolutionDir)3rd\spdlog-1.x\include;$(SolutionDir)3rd\rapidjson\include;$(SolutionDir)Util;$(SolutionDir)ServiceLoader\include;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)3rd;$(SolutionDir)3rd\spdlog-1.x\include;$(SolutionDir)3rd\rapidjson\include;$(SolutionDir)3rd\libarchive-libarchive\include;$(SolutionDir)Util;$(SolutionDir)ServiceLoader\include;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(SolutionDir)3rd\libarchive-libarchive\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>archive.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>if exist "$(ProjectDir)lib\$(ProjectName).pdb" (del /s /f "$(ProjectDir)lib\$(ProjectName).pdb")

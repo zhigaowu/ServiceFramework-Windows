@@ -11,6 +11,9 @@ extern "C" {
 #include "rapidjson/rapidjson.h"
 #include "rapidjson/document.h"
 
+#include "archive.h"
+#include "archive_entry.h"
+
 #include <unordered_set>
 #include <unordered_map>
 #include <list>
@@ -80,6 +83,7 @@ private:
     void handle_service_create(struct mg_connection *nc, struct http_message *hm);
     void handle_service_delete(struct mg_connection *nc, struct http_message *hm);
     void handle_service_control(struct mg_connection *nc, struct http_message *hm);
+    void handle_service_upgrade(struct mg_connection *nc, struct http_message *hm);
 
     void handle_html(struct mg_connection *nc, struct http_message *hm);
 
@@ -93,6 +97,14 @@ private:
     bool begin_upload_package();
     bool write_upload_package(const char* data, size_t len);
     long end_upload_package();
+
+private:
+    struct archive* open_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    std::list<std::string> parse_dependent_service_definitions(struct archive* ar);
+    bool stop_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    bool upgrade_dependent_services(struct archive* ar, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    bool start_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    void close_package(struct archive* ar);
 
 private:
     friend void ev_handler(struct mg_connection *nc, int ev, void *ev_data);

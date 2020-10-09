@@ -44,29 +44,21 @@
       </tbody>
       <tfoot>        
         <tr>
-          <td colspan="2">
-            <form method="post" id="upload-package-form" name="upload-package-form" onsubmit="return UploadPackage();">
-              <!--div class="custom-file mt-3 mb-3"-->
-                <input type="file" id="file" name="file" required>
-                <!--label class="custom-file-label selected" for="customFile">Choose package</label-->
-                <div id="upload-progress">Example invalid custom file feedback</div>
-              <!--/div-->
-              <input type="submit" id="upload-package-submit">
-              <!--a class="btn btn-primary btn-sm" href="#" onclick="ClickUpload()">
-                <i class="fa fa-upload">
-                </i>
-                Upload
-              </a-->
-            </form>
-          </td>
-          <td>
-            <a class="btn btn-primary btn-sm" href="#">
-              <i class="fa fa-arrow-up">
+          <td class="project-actions text-right">
+            <a class="btn btn-primary btn-sm" data-toggle="modal" data-target="#ServiceUpgradeDialog" data-backdrop="static" data-keyboard="false" href="#">
+              <i class="fa fa-arrow-circle-o-up">
               </i>
               Upgrade
             </a>
           </td>
+          <td colspan="3">
+          </td>
           <td class="project-actions text-right">
+            <a class="btn btn-primary btn-sm" href="#" onclick="LoadServices()">
+              <i class="fa fa-refresh">
+              </i>
+              Refresh
+            </a>
             <a class="btn btn-primary btn-sm" data-toggle="modal" data-target="#AddServiceDialog" data-backdrop="static" data-keyboard="false" href="#">
               <i class="fa fa-plus">
               </i>
@@ -76,6 +68,7 @@
         </tr>
       </tfoot>
     </table>
+    
     <!-- The Add Modal -->
     <div class="modal" id="AddServiceDialog">
       <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
@@ -172,7 +165,48 @@
           <div class="modal-footer">
             <input type="hidden" id="ServiceType" value="service"/>
             <input type="hidden" id="ServiceIndex" value=""/>
-            <button type="button" id="EditServiceOK" class="btn btn-success">OK</button>
+            <button type="button" id="EditServiceOKButton" class="btn btn-success">OK</button>
+          </div>
+          
+        </div>
+      </div>
+    </div>
+    
+    <!-- The Upgrade Modal -->
+    <div class="modal" id="ServiceUpgradeDialog">
+      <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+        
+          <!-- Modal Header -->
+          <div class="modal-header">
+            <h4 class="modal-title">Upgrade Service</h4>
+            <button type="button" class="close" data-dismiss="modal">&times;</button>
+          </div>
+          
+          <!-- Modal body -->
+          <div class="modal-body">
+            <form method="post" id="upload-package-form" name="upload-package-form" onsubmit="return UploadPackage();">
+              <table class="table table-borderless table-sm projects">
+                <thead class="thead-light">
+                  <tr>
+                    <th style="width: 10%">
+                      <input type="file" id="file" name="file" required>
+                      <br/>
+                      <small id="upload-progress">
+                      </small>
+                    </th>
+                    <th style="width: 50%">
+                      <input type="submit" id="upload-package-submit" value="Upload">
+                    </th>
+                  </tr>
+                </thead>
+              </table>
+            </form>
+          </div>
+          
+          <!-- Modal footer -->
+          <div class="modal-footer">
+            <button type="button" id="UpgradeButton" class="btn btn-success">Upgrade</button>
           </div>
           
         </div>
@@ -201,11 +235,6 @@
     var status_background_class_types = ["badge-dark", "badge-danger", "badge-warning", "badge-warning", "badge-success"];
     var status_link_class_types = ["disabled", "enabled", "disabled", "disabled", "enabled"];
     var status_action_types = ["Start", "Start", "Stop", "Start", "Stop"];
-    
-    function ClickUpload()
-    {
-      jQuery('#upload-package-submit').click();
-    }
     
     function UpdateUploadProgress(evt) 
     {
@@ -241,11 +270,12 @@
     function EnableAddServiceOKButton() {
       $('#AddServiceOK').prop('disabled', false);
     }
+    
     function ShowServiceInformationDialog() {
       $('#ServiceType').val('service');
       var modal = $('#ServiceInformationDialog');
       modal.find('.modal-title').text('View Service');
-      modal.find('#EditServiceOK').text('OK');
+      modal.find('#EditServiceOKButton').text('OK');
       modal.modal({backdrop: 'static', keyboard: false});
     }
     
@@ -487,6 +517,29 @@
       }
     }
     
+    function SubmitServiceUpgrade()
+    {
+      $.ajax({
+        url: '/service/upgrade',
+        method: 'POST',
+        dataType: 'json',
+        data: {
+        },
+        success: function(json) {
+          if (json.code == 0) {
+            toastr.success('Upgrade services success');
+            $('#ServiceUpgradeDialog').modal('hide');
+            LoadServices();
+          } else {
+            toastr.error(json.result);
+          }              
+        },
+        error: function (jqXHR, textStatus, errorThrown) {
+          toastr.error(textStatus + jqXHR.responseText);
+        }
+      });
+    }
+    
     $(function() {
       $('#AddServiceDialog').on('hidden.bs.modal', function (e) {
         $('#service-definition-container').empty();
@@ -503,13 +556,15 @@
         
         var modal = $('#ServiceInformationDialog');
         modal.find('.modal-title').text('Install Service');
-        modal.find('#EditServiceOK').text('Install');
+        modal.find('#EditServiceOKButton').text('Install');
         modal.modal({backdrop: 'static', keyboard: false});
       });
       
       $('#ServiceInformationDialog').on('shown.bs.modal', InitServiceInformationDialog);
       
-      $('#EditServiceOK').on('click', SubmitServiceChange);
+      $('#EditServiceOKButton').on('click', SubmitServiceChange);
+      
+      $('#UpgradeButton').on('click', SubmitServiceUpgrade);
       
       LoadServices();
     });

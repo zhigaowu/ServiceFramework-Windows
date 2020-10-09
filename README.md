@@ -9,10 +9,14 @@
 
 * All services can be managed by web
 
-### Web GUI
+### Web GUI(Service Operation)
 ![service_choose_gui](https://user-images.githubusercontent.com/4556201/94521870-510fb800-0261-11eb-8bfe-5f73013e0118.png)
 ![service_adding_gui](https://user-images.githubusercontent.com/4556201/94521888-55d46c00-0261-11eb-9280-a0f2bc5b3b13.png)
 ![service_added_result](https://user-images.githubusercontent.com/4556201/94521900-5a008980-0261-11eb-9d72-aa02b4ebe23a.png)
+
+### Web GUI(Service Upgrade)
+![main_page](https://user-images.githubusercontent.com/4556201/95555149-f128c680-0a43-11eb-93cb-abd5a4bcc95a.png)
+![upload](https://user-images.githubusercontent.com/4556201/95555169-f84fd480-0a43-11eb-861a-4112dd2b1c48.png)
 
 ### Notes:
 logic is simple, so there are some limits:

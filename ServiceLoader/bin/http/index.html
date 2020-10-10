@@ -232,6 +232,10 @@
       });
     });
     
+    $(document).bind("contextmenu",function(e){
+      return false;
+    });
+    
     var status_background_class_types = ["badge-dark", "badge-danger", "badge-warning", "badge-warning", "badge-success"];
     var status_link_class_types = ["disabled", "enabled", "disabled", "disabled", "enabled"];
     var status_action_types = ["Start", "Start", "Stop", "Start", "Stop"];
@@ -263,6 +267,12 @@
         },
       }).done(function(data) {
           document.getElementById("upload-progress").textContent = "Result: " + data;
+          
+          if (data.indexOf('(done)') > 0) {
+            $('#UpgradeButton').prop('disabled', false);
+          } else {
+            $('#UpgradeButton').prop('disabled', true);
+          }
       });
       return false;
     }
@@ -517,6 +527,13 @@
       }
     }
     
+    function InitServiceUpgradeDialog()
+    {
+      $('#UpgradeButton').prop('disabled', true);
+      $('#upload-progress').text('');
+      $('#file').val('');
+    }
+    
     function SubmitServiceUpgrade()
     {
       $.ajax({
@@ -526,15 +543,17 @@
         data: {
         },
         success: function(json) {
+          $('#UpgradeButton').prop('disabled', true);
           if (json.code == 0) {
             toastr.success('Upgrade services success');
             $('#ServiceUpgradeDialog').modal('hide');
             LoadServices();
           } else {
             toastr.error(json.result);
-          }              
+          }
         },
         error: function (jqXHR, textStatus, errorThrown) {
+          $('#UpgradeButton').prop('disabled', true);
           toastr.error(textStatus + jqXHR.responseText);
         }
       });
@@ -560,10 +579,10 @@
         modal.modal({backdrop: 'static', keyboard: false});
       });
       
-      $('#ServiceInformationDialog').on('shown.bs.modal', InitServiceInformationDialog);
-      
+      $('#ServiceInformationDialog').on('shown.bs.modal', InitServiceInformationDialog);      
       $('#EditServiceOKButton').on('click', SubmitServiceChange);
       
+      $('#ServiceUpgradeDialog').on('shown.bs.modal', InitServiceUpgradeDialog);
       $('#UpgradeButton').on('click', SubmitServiceUpgrade);
       
       LoadServices();

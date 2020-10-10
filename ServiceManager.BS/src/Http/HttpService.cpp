@@ -45,6 +45,52 @@ static Service_Options_Type Service_Options = {
     { "--log.keep", Service_Option_Log_Keep }
 };
 
+class ArchiveCloser
+{
+public:
+    ArchiveCloser(struct archive* ar, bool reading = true)
+    {
+        _reading = reading;
+        _ar = ar;
+        _open = false;
+    }
+
+    void Open()
+    {
+        _open = true;
+    }
+
+    ~ArchiveCloser()
+    {
+        if (_reading)
+        {
+            if (_open)
+            {
+                archive_read_close(_ar);
+            }
+            archive_read_free(_ar);
+        } 
+        else
+        {
+            if (_open)
+            {
+                archive_write_close(_ar);
+            }
+            archive_write_free(_ar);
+        }
+    }
+
+private:
+    bool _reading;
+    struct archive* _ar;
+    bool _open;
+
+private:
+    ArchiveCloser();
+    ArchiveCloser(const ArchiveCloser&);
+    ArchiveCloser& operator=(const ArchiveCloser&);
+};
+
 std::shared_ptr<spdlog::logger> HttpService::_logger;
 
 std::shared_ptr<spdlog::logger>& HttpService::logger()
@@ -232,78 +278,40 @@ static void GetLastErrorString(rapidjson::Value& err, rapidjson::Document::Alloc
 #endif
 }
 
-static int archive_copy_data(struct archive *ar, struct archive *aw)
+static int archive_copy_data(struct archive *ar, struct archive *aw, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
 {
     int r;
     const void *buff;
     size_t size;
     la_int64_t offset;
 
-    for (;;) {
+    for (;;) 
+    {
         r = archive_read_data_block(ar, &buff, &size, &offset);
         if (r == ARCHIVE_EOF)
+        {
             return (ARCHIVE_OK);
+        }
         if (r < ARCHIVE_OK)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString(archive_error_string(ar), allo);
+
+            HttpService::logger()->error("Read package data failed: {}", archive_error_string(ar));
             return (r);
-        r = archive_write_data_block(aw, buff, size, offset);
-        if (r < ARCHIVE_OK) {
-            fprintf(stderr, "%s\n", archive_error_string(aw));
+        }
+
+        la_int64_t w = archive_write_data_block(aw, buff, size, offset);
+        if (w < ARCHIVE_OK) 
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString(archive_error_string(aw), allo);
+
+            HttpService::logger()->error("Write package data failed: {}", archive_error_string(aw));
             return (r);
         }
     }
-}
-
-static void archive_extract(const char *filename)
-{
-    struct archive *a;
-    struct archive *ext;
-    struct archive_entry *entry;
-    int flags;
-    int r;
-
-    /* Select which attributes we want to restore. */
-    flags = ARCHIVE_EXTRACT_TIME;
-    flags |= ARCHIVE_EXTRACT_PERM;
-    flags |= ARCHIVE_EXTRACT_ACL;
-    flags |= ARCHIVE_EXTRACT_FFLAGS;
-
-    a = archive_read_new();
-    archive_read_support_format_all(a);
-    archive_read_support_compression_all(a);
-    ext = archive_write_disk_new();
-    archive_write_disk_set_options(ext, flags);
-    archive_write_disk_set_standard_lookup(ext);
-    if ((r = archive_read_open_filename(a, filename, 10240)))
-        exit(1);
-    for (;;) {
-        r = archive_read_next_header(a, &entry);
-        if (r == ARCHIVE_EOF)
-            break;
-        if (r < ARCHIVE_OK)
-            fprintf(stderr, "%s\n", archive_error_string(a));
-        if (r < ARCHIVE_WARN)
-            exit(1);
-        r = archive_write_header(ext, entry);
-        if (r < ARCHIVE_OK)
-            fprintf(stderr, "%s\n", archive_error_string(ext));
-        else if (archive_entry_size(entry) > 0) {
-            r = archive_copy_data(a, ext);
-            if (r < ARCHIVE_OK)
-                fprintf(stderr, "%s\n", archive_error_string(ext));
-            if (r < ARCHIVE_WARN)
-                exit(1);
-        }
-        r = archive_write_finish_entry(ext);
-        if (r < ARCHIVE_OK)
-            fprintf(stderr, "%s\n", archive_error_string(ext));
-        if (r < ARCHIVE_WARN)
-            exit(1);
-    }
-    archive_read_close(a);
-    archive_read_free(a);
-    archive_write_close(ext);
-    archive_write_free(ext);
-    //exit(0);
+    return (ARCHIVE_OK);
 }
 
 static void ev_upload(struct mg_connection *nc, int ev, void *p) 
@@ -1720,28 +1728,33 @@ void HttpService::handle_service_upgrade(struct mg_connection *nc, struct http_m
     rapidjson::Value code(rapidjson::kNumberType);
     rapidjson::Value res(rapidjson::kStringType);
 
+    std::string package_path_name;
     do
     {
-        struct archive *ar = open_package(code, res, doc.GetAllocator());
-        if (!ar)
+        std::list<std::string> related_definitions;
+        if (!parse_dependent_service_definitions(related_definitions, package_path_name, code, res, doc.GetAllocator()))
         {
             break;
         }
 
-        std::list<std::string> related_definitions = parse_dependent_service_definitions(ar);
+        if (!extract_package(code, res, doc.GetAllocator()))
+        {
+            break;
+        }
+
         if (!stop_dependent_services(related_definitions, code, res, doc.GetAllocator()) ||
-            !upgrade_dependent_services(ar, code, res, doc.GetAllocator()) ||
+            !upgrade_service_with_package(package_path_name, code, res, doc.GetAllocator()) ||
             !start_dependent_services(related_definitions, code, res, doc.GetAllocator()))
         {
-            close_package(ar);
             break;
         }
 
         code.SetInt(Service_Module_Success);
         res.SetString("success", doc.GetAllocator());
 
-        close_package(ar);
     } while (false);
+
+    delete_package(package_path_name);
 
     doc.AddMember("code", code, doc.GetAllocator());
     doc.AddMember("result", res, doc.GetAllocator());
@@ -2047,11 +2060,12 @@ long HttpService::end_upload_package()
     return len;
 }
 
-struct archive* HttpService::open_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+bool HttpService::parse_dependent_service_definitions(std::list<std::string>& related_definitions, std::string& package_path_name, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
 {
-    struct archive *ar = nullptr;
-    do 
+    do
     {
+        code.SetInt(Service_Module_Success);
+
         std::string package_path(_root + Service_Tmp_Dir + Service_Upgrade_File);
         if (_access(package_path.c_str(), 00) != 0)
         {
@@ -2060,58 +2074,217 @@ struct archive* HttpService::open_package(rapidjson::Value& code, rapidjson::Val
             break;
         }
 
-        ar = archive_read_new();
+        struct archive *ar = archive_read_new();
         if (!ar)
         {
             code.SetInt(Service_Module_Failed);
-            err.SetString("Unsupported package type", allo);
+            err.SetString("Initialize archive library for reading failed", allo);
+
             break;
         }
 
+        ArchiveCloser close_guarantee(ar);
         archive_read_support_filter_all(ar);
         archive_read_support_format_all(ar);
 
-        int r = archive_read_open_filename(ar, package_path.c_str(), 10240); // Note 1
-        if (r != ARCHIVE_OK)
+        if (archive_read_open_filename(ar, package_path.c_str(), 10240) != ARCHIVE_OK)
         {
             code.SetInt(Service_Module_Failed);
-            err.SetString("Unsupported package format", allo);
+            err.SetString("Unsupported package type", allo);
+
             break;
         }
-    } while (false);
+        close_guarantee.Open();
 
-    return ar;
-}
-
-std::list<std::string> HttpService::parse_dependent_service_definitions(struct archive* ar)
-{
-    std::list<std::string> related_definitions;
-    struct archive_entry *entry = nullptr;
-    while (archive_read_next_header(ar, &entry) == ARCHIVE_OK) 
-    {
-        const char* pathname = archive_entry_pathname(entry);
-        size_t pathname_len = strlen(pathname);
-        // is library
-        if (pathname_len > 4 && pathname[pathname_len - 4] == '.' && pathname[pathname_len - 3] == 'd' && pathname[pathname_len - 2] == 'l' && pathname[pathname_len - 1] == 'l')
+        struct archive_entry *entry = nullptr;
+        while (archive_read_next_header(ar, &entry) == ARCHIVE_OK)
         {
-            // top dir/services/service template id/service.dll
+            const char* pathname = archive_entry_pathname(entry);
+            size_t pathname_len = strlen(pathname);
+
             const char* first_slash = std::find(pathname, pathname + pathname_len, '/');
-            if (first_slash != pathname + pathname_len)
+            // is library
+            if (pathname_len > 4 && pathname[pathname_len - 4] == '.' && pathname[pathname_len - 3] == 'd' && pathname[pathname_len - 2] == 'l' && pathname[pathname_len - 1] == 'l')
             {
-                const char* second_slash = std::find(first_slash + 1, pathname + pathname_len, '/');
-                if (second_slash != pathname + pathname_len && strncmp(first_slash + 1, "services", 8) == 0)
+                // top dir/services/service template id/service.dll
+                if (first_slash != pathname + pathname_len)
                 {
-                    const char* third_slash = std::find(second_slash + 1, pathname + pathname_len, '/');
-                    if (third_slash != pathname + pathname_len)
+                    const char* second_slash = std::find(first_slash + 1, pathname + pathname_len, '/');
+                    if (second_slash != pathname + pathname_len && strncmp(first_slash + 1, "services", 8) == 0)
                     {
-                        related_definitions.emplace_back(std::string(second_slash + 1, third_slash));
+                        const char* third_slash = std::find(second_slash + 1, pathname + pathname_len, '/');
+                        if (third_slash != pathname + pathname_len)
+                        {
+                            related_definitions.emplace_back(std::string(second_slash + 1, third_slash));
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (first_slash != pathname + pathname_len)
+                {
+                    if (package_path_name.empty())
+                    {
+                        package_path_name = std::string(pathname, first_slash);
+                    }
+                    else
+                    {
+                        // package should have only one top directory
+                        if (strncmp(package_path_name.c_str(), pathname, first_slash - pathname) != 0)
+                        {
+                            code.SetInt(Service_Module_Failed);
+                            err.SetString("Unsupported package format", allo);
+
+                            break;
+                        }
                     }
                 }
             }
         }
-        archive_read_data_skip(ar);  // Note 2
+    } while (false);
+
+    if (package_path_name.empty())
+    {
+        code.SetInt(Service_Module_Failed);
+        err.SetString("Unsupported package format", allo);
     }
-    return related_definitions;
+    else
+    {
+        package_path_name += "\\";
+    }
+
+    return code.GetInt() == Service_Module_Success;
+}
+
+bool HttpService::extract_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    do
+    {
+        code.SetInt(Service_Module_Success);
+
+        std::string package_path(_root + Service_Tmp_Dir + Service_Upgrade_File);
+        if (_access(package_path.c_str(), 00) != 0)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Upgrade package not found", allo);
+            break;
+        }
+
+        // initialize input
+        struct archive *ar = archive_read_new();
+        if (!ar)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Initialize archive library for reading failed", allo);
+
+            break;
+        }
+
+        ArchiveCloser ar_close_guarantee(ar);
+        archive_read_support_format_all(ar);
+        archive_read_support_compression_all(ar);
+
+        // initialize output
+        int flags = ARCHIVE_EXTRACT_TIME;
+        flags |= ARCHIVE_EXTRACT_PERM;
+        flags |= ARCHIVE_EXTRACT_ACL;
+        flags |= ARCHIVE_EXTRACT_FFLAGS;
+
+        struct archive *ext = archive_write_disk_new();
+        if (!ext)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Initialize archive library for writing failed", allo);
+
+            break;
+        }
+
+        ArchiveCloser ext_close_guarantee(ext, false);
+        archive_write_disk_set_options(ext, flags);
+        archive_write_disk_set_standard_lookup(ext);
+
+        if (archive_read_open_filename(ar, package_path.c_str(), 10240) != ARCHIVE_OK)
+        {
+            code.SetInt(Service_Module_Failed);
+            err.SetString("Unsupported package type", allo);
+
+            break;
+        }
+        ar_close_guarantee.Open();
+        ext_close_guarantee.Open();
+
+        // for writing path
+        std::string ext_root(_root + Service_Tmp_Dir);
+        std::for_each(ext_root.begin(), ext_root.end(), [](char& ch) {
+            if ('\\' == ch)
+            {
+                ch = '/';
+            }
+        });
+        char ext_path[512] = { 0 };
+
+        struct archive_entry *entry = nullptr;
+        for (;;)
+        {
+            int r = archive_read_next_header(ar, &entry);
+            if (r == ARCHIVE_EOF)
+            {
+                break;
+            }
+
+            if (r < ARCHIVE_WARN)
+            {
+                code.SetInt(Service_Module_Failed);
+                err.SetString(archive_error_string(ar), allo);
+
+                _logger->error("Read package failed: {}", archive_error_string(ar));
+                break;
+            }
+            else if (r < ARCHIVE_OK)
+            {
+                _logger->warn("Read package: {}", archive_error_string(ar));
+            }
+
+            const char* pathname = archive_entry_pathname(entry);
+            memset(ext_path, 0, sizeof(ext_path));
+            snprintf(ext_path, sizeof(ext_path), "%s%s", ext_root.c_str(), pathname);
+            archive_entry_set_pathname(entry, ext_path);
+
+            r = archive_write_header(ext, entry);
+            if (r < ARCHIVE_OK)
+            {
+                code.SetInt(Service_Module_Failed);
+                err.SetString(archive_error_string(ar), allo);
+
+                _logger->error("Write archive head failed: {}", archive_error_string(ar));
+                break;
+            }
+            else if (archive_entry_size(entry) > 0)
+            {
+                if (archive_copy_data(ar, ext, code, err, allo) < ARCHIVE_OK)
+                {
+                    break;
+                }
+            }
+
+            r = archive_write_finish_entry(ext);
+            if (r < ARCHIVE_WARN)
+            {
+                code.SetInt(Service_Module_Failed);
+                err.SetString(archive_error_string(ar), allo);
+
+                _logger->error("Write archive tail failed: {}", archive_error_string(ar));
+                break;
+            }
+            else if (r < ARCHIVE_OK)
+            {
+                _logger->warn("Write archive tail: {}", archive_error_string(ar));
+            }
+        }
+    } while (false);
+
+    return code.GetInt() == Service_Module_Success;
 }
 
 bool HttpService::stop_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
@@ -2194,9 +2367,148 @@ bool HttpService::stop_dependent_services(const std::list<std::string>& related_
     return code.GetInt() == Service_Module_Success;
 }
 
-bool HttpService::upgrade_dependent_services(struct archive* ar, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+bool HttpService::copy_package_file(const std::string& src, const std::string& dst, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
 {
+    std::vector<char> buff(512);
+    std::ifstream ifs(src, std::ios::binary);
+    if (!ifs.is_open())
+    {
+        snprintf(buff.data(), buff.size(), "Read package file(%s) failed", src.c_str());
+        code.SetInt(Service_Module_Failed);
+        err.SetString(buff.data(), allo);
+        return false;
+    }
+
+    std::ofstream ofs(dst, std::ios::binary);
+    if (!ofs.is_open())
+    {
+        snprintf(buff.data(), buff.size(), "Write package file(%s) failed", dst.c_str());
+        code.SetInt(Service_Module_Failed);
+        err.SetString(buff.data(), allo);
+        return false;
+    }
+
+    ifs.seekg(0, std::ios::end);
+    size_t length = ifs.tellg();
+    ifs.seekg(0, std::ios::beg);
+
+    buff.resize(length);
+    ifs.read(buff.data(), length);
+    ofs.write(buff.data(), length);
+
     return true;
+}
+
+bool HttpService::copy_package_directory(const std::string& src_path, const std::string& dst_path, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    WIN32_FIND_DATA ffd;
+
+    std::string pattern_all = src_path + "*.*";
+    HANDLE hFind = FindFirstFile(pattern_all.c_str(), &ffd);
+    if (NULL == hFind)
+    {
+        code.SetInt(Service_Module_Failed);
+        GetLastErrorString(err, allo);
+        return false;
+    }
+
+    do
+    {
+        code.SetInt(Service_Module_Success);
+
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (ffd.cFileName[0] == '.' && (ffd.cFileName[1] == 0 || ffd.cFileName[1] == '.'))
+            {
+                continue;
+            }
+
+            std::string dst_dir = dst_path + ffd.cFileName + "\\";
+            if (_access(dst_dir.c_str(), 00) != 0 && _mkdir(dst_dir.c_str()) != 0)
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                break;
+            }
+
+            std::string src_dir = src_path + ffd.cFileName + "\\";
+            if (!copy_package_directory(src_dir, dst_dir, code, err, allo))
+            {
+                break;
+            }
+        }
+        else if (ffd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)
+        {
+            std::string dst_file = dst_path + ffd.cFileName;
+            std::string src_file = src_path + ffd.cFileName;
+            if (!copy_package_file(src_file, dst_file, code, err, allo))
+            {
+                break;
+            }
+        }
+
+    } while (FindNextFile(hFind, &ffd) != 0);
+
+    FindClose(hFind);
+
+    return code.GetInt() == Service_Module_Success;
+}
+
+bool HttpService::upgrade_service_with_package(const std::string& package_path_name, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
+{
+    WIN32_FIND_DATA ffd;
+
+    std::string pattern_all = _root + Service_Tmp_Dir + package_path_name + "*.*";
+    HANDLE hFind = FindFirstFile(pattern_all.c_str(), &ffd);
+    if (NULL == hFind)
+    {
+        code.SetInt(Service_Module_Failed);
+        GetLastErrorString(err, allo);
+        return false;
+    }
+
+    do
+    {
+        code.SetInt(Service_Module_Success);
+
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (ffd.cFileName[0] == '.' && (ffd.cFileName[1] == 0 || ffd.cFileName[1] == '.'))
+            {
+                continue;
+            }
+
+            std::string dst_dir = _root + ffd.cFileName + "\\";
+            if (_access(dst_dir.c_str(), 00) != 0 && _mkdir(dst_dir.c_str()) != 0)
+            {
+                code.SetInt(Service_Module_Failed);
+                GetLastErrorString(err, allo);
+
+                break;
+            }
+
+            std::string src_dir = _root + Service_Tmp_Dir + package_path_name + ffd.cFileName + "\\";
+            if (!copy_package_directory(src_dir, dst_dir, code, err, allo))
+            {
+                break;
+            }
+        }
+        else if (ffd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)
+        {
+            std::string dst_file = _root + ffd.cFileName;
+            std::string src_file = _root + Service_Tmp_Dir + package_path_name + ffd.cFileName;
+            if (!copy_package_file(src_file, dst_file, code, err, allo))
+            {
+                break;
+            }
+        }
+        
+    } while (FindNextFile(hFind, &ffd) != 0);
+
+    FindClose(hFind);
+
+    return code.GetInt() == Service_Module_Success;
 }
 
 bool HttpService::start_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo)
@@ -2275,15 +2587,84 @@ bool HttpService::start_dependent_services(const std::list<std::string>& related
     return code.GetInt() == Service_Module_Success;
 }
 
-void HttpService::close_package(struct archive* ar)
+void HttpService::delete_package_file(const std::string& path)
 {
-    if (ar)
+    if (_access(path.c_str(), 00) == 0)
     {
-        int r = archive_read_free(ar);  // Note 3
-        if (ARCHIVE_OK != r)
+        if (remove(path.c_str()) != 0)
         {
-            _logger->warn("free archive failed: {}", archive_error_string(ar));
+            _logger->warn("delete package file({}) failed: {}", path.c_str(), GetLastErrorString().c_str());
         }
     }
+}
+
+void HttpService::delete_package_directory(const std::string& path)
+{
+    WIN32_FIND_DATA ffd;
+
+    std::string pattern_all = path + "*.*";
+    HANDLE hFind = FindFirstFile(pattern_all.c_str(), &ffd);
+    if (hFind)
+    {
+        do
+        {
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                if (ffd.cFileName[0] == '.' && (ffd.cFileName[1] == 0 || ffd.cFileName[1] == '.'))
+                {
+                    continue;
+                }
+                std::string src_dir = path + ffd.cFileName + "\\";
+                delete_package_directory(src_dir);
+            }
+            else if (ffd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)
+            {
+                std::string src_file = path + ffd.cFileName;
+                delete_package_file(src_file);
+            }
+
+        } while (FindNextFile(hFind, &ffd) != 0);
+
+        FindClose(hFind);
+    }
+
+    _rmdir(path.c_str());
+}
+
+void HttpService::delete_package(const std::string& package_path_name)
+{
+    // delete compresses package
+    delete_package_file(_root + Service_Tmp_Dir + Service_Upgrade_File);
+
+    WIN32_FIND_DATA ffd;
+
+    std::string package_root = _root + Service_Tmp_Dir + package_path_name;
+    std::string pattern_all = package_root + "*.*";
+    HANDLE hFind = FindFirstFile(pattern_all.c_str(), &ffd);
+    if (hFind)
+    {
+        do
+        {
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                if (ffd.cFileName[0] == '.' && (ffd.cFileName[1] == 0 || ffd.cFileName[1] == '.'))
+                {
+                    continue;
+                }
+                std::string src_dir = package_root + ffd.cFileName + "\\";
+                delete_package_directory(src_dir);
+            }
+            else if (ffd.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE)
+            {
+                std::string src_file = package_root + ffd.cFileName;
+                delete_package_file(src_file);
+            }
+
+        } while (FindNextFile(hFind, &ffd) != 0);
+
+        FindClose(hFind);
+    }
+
+    _rmdir(package_root.c_str());
 }
 

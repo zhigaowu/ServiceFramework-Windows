@@ -99,12 +99,20 @@ private:
     long end_upload_package();
 
 private:
-    struct archive* open_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
-    std::list<std::string> parse_dependent_service_definitions(struct archive* ar);
+    bool parse_dependent_service_definitions(std::list<std::string>& related_definitions, std::string& package_path_name, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    bool extract_package(rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+
     bool stop_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
-    bool upgrade_dependent_services(struct archive* ar, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+
+    bool copy_package_file(const std::string& src, const std::string& dst, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    bool copy_package_directory(const std::string& src_path, const std::string& dst_path, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+    bool upgrade_service_with_package(const std::string& package_path_name, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
+
     bool start_dependent_services(const std::list<std::string>& related_definitions, rapidjson::Value& code, rapidjson::Value& err, rapidjson::Document::AllocatorType& allo);
-    void close_package(struct archive* ar);
+
+    void delete_package_file(const std::string& path);
+    void delete_package_directory(const std::string& path);
+    void delete_package(const std::string& package_path_name);
 
 private:
     friend void ev_handler(struct mg_connection *nc, int ev, void *ev_data);
